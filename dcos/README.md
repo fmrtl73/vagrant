@@ -1,3 +1,8 @@
+# Note to Portworx users
+
+This is cloned from the dcos-vagrant repo in order to modify the base image to include an ISCI controller and 20GB of storage on each node in order for Portworx to function.
+
+
 # DC/OS Vagrant
 
 Quickly provision a [DC/OS](https://github.com/dcos/dcos) cluster on a local machine for development, testing, or demonstration.

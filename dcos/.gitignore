@@ -4,10 +4,6 @@
 exhibitor.properties
 /dcos
 /provision/jre-*-linux-x64.tgz
-dcos-box.box
 dcos_generate_config*.sh
-/etc/config.yaml
-/VagrantConfig.yaml
-/installers
 /test-junit.xml
 /*.log

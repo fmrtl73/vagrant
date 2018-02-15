@@ -2,6 +2,16 @@
 
 This is cloned from the dcos-vagrant repo in order to modify the base image to include an ISCI controller and 20GB of storage on each node in order for Portworx to function.
 
+The start-etcd.sh script was also added as a convenience so you can start etcd and point your installation to it.
+
+When install Portworx from the Universe you should make sure to configure the right network for Portworx to use or else it will pick up a local IP address and fail to come up.
+
+
+PORTWORX OPTIONS: -a -d enp0s8
+KVDB SERVERS: <IP_OF_ETCD>:2379
+CONTAINER PARAMETERS: -d enp0s8
+
+Take all other defaults and you should be good to go!
 
 # DC/OS Vagrant
 

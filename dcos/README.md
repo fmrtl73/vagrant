@@ -8,8 +8,11 @@ When install Portworx from the Universe you should make sure to configure the ri
 
 
 PORTWORX OPTIONS: -a -d enp0s8
+
 KVDB SERVERS: <IP_OF_ETCD>:2379
+
 CONTAINER PARAMETERS: -d enp0s8
+
 
 Take all other defaults and you should be good to go!
 

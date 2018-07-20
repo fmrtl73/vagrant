@@ -1,6 +1,6 @@
 # Note to Portworx users
 
-This is cloned from the dcos-vagrant repo in order to modify the base image to include an ISCI controller and 20GB of storage on each node in order for Portworx to function.
+This is cloned from the dcos-vagrant repo in order to modify the base image to include an ISCI controller and 20GB of storage on each node in order for Portworx to function. You will need to download the box into the vagrant/dcos folder from here: https://s3.amazonaws.com/dcos-pwx-box/dcos-pwx.box
 
 The start-etcd.sh script was also added as a convenience so you can start etcd and point your installation to it.
 

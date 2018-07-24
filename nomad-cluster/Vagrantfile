@@ -96,11 +96,12 @@ start_consul = <<SCRIPT
   if [ $? -eq 0 ]; then
     cat > /etc/systemd/system/consul-server.service << _eof
     [Unit]
-    Description=IoT iaas consul server
+    Description=consul server
     Wants=network-online.target
     After=network-online.target
     [Service]
-    ExecStart= /bin/sh -c "/usr/bin/consul agent -server -bootstrap-expect=#{host_count} -data-dir=/etc/consul.d -node=agent-$host -bind=#{server_ip} -client=#{server_ip} -enable-script-checks=true -config-dir=/etc/consul.d"
+    Type=notify
+    ExecStart=/usr/bin/consul agent -server -bootstrap-expect=#{host_count} -data-dir=/etc/consul.d -node=agent-$host -bind=#{server_ip} -client=#{server_ip} -enable-script-checks=true -config-dir=/etc/consul.d
     Restart=alwaysRestartSec=10
     [Install]
     WantedBy=multi-user.targetIntroduction
@@ -112,11 +113,12 @@ _eof
     ip=`hostname -I | awk '{print $2}'`
     cat > /etc/systemd/system/consul-server.service << _eof
     [Unit]
-    Description=IoT iaas consul server
+    Type=notify
+    Description=consul server
     Wants=network-online.target
     After=network-online.target
     [Service]
-    ExecStart= /bin/sh -c "/usr/bin/consul agent -server -bootstrap-expect=#{host_count} -data-dir=/etc/consul.d -node=agent-$host -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d -retry-join #{server_ip}"
+    ExecStart=/usr/bin/consul agent -server -bootstrap-expect=#{host_count} -data-dir=/etc/consul.d -node=agent-$host -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d -retry-join #{server_ip}
     Restart=alwaysRestartSec=10
     [Install]
     WantedBy=multi-user.targetIntroduction
@@ -156,7 +158,7 @@ _eof
     Wants=network-online.target
     After=network-online.target
     [Service]
-    ExecStart= /bin/sh -c “/usr/bin/nomad agent -config=/etc/nomad.d/server.hcl”
+    ExecStart=/usr/bin/nomad agent -config=/etc/nomad.d/server.hcl
     Restart=always
     RestartSec=10
     [Install]
@@ -204,7 +206,7 @@ _eof
     Wants=network-online.target
     After=network-online.target
     [Service]
-    ExecStart= /bin/sh -c “/usr/bin/nomad agent -config /etc/nomad.d/client.hcl”
+    ExecStart=/usr/bin/nomad agent -config /etc/nomad.d/client.hcl
     Restart=always
     RestartSec=10
     [Install]

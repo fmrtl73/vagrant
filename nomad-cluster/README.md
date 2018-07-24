@@ -33,6 +33,9 @@ ID        DC   Name       Class   Drain  Eligibility  Status
 39069381  dc1  client-a2  <none>  false  eligible     ready
 00ef16a7  dc1  client-a1  <none>  false  eligible     ready
 vagrant@s1:~$ consul members
-Node     Address             Status  Type    Build  Protocol  DC   Segment
-agent-1  192.168.56.70:8301  alive   server  1.0.7  2         dc1  <all>
+Node      Address             Status  Type    Build  Protocol  DC   Segment
+agent-s1  192.168.56.70:8301  alive   server  1.0.7  2         dc1  <all>
+agent-a1  192.168.56.71:8301  alive   client  1.0.7  2         dc1  <default>
+agent-a2  192.168.56.72:8301  alive   client  1.0.7  2         dc1  <default>
+agent-a3  192.168.56.73:8301  alive   client  1.0.7  2         dc1  <default>
 ```

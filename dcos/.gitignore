@@ -7,3 +7,4 @@ exhibitor.properties
 dcos_generate_config*.sh
 /test-junit.xml
 /*.log
+*.box

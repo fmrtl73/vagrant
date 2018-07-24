@@ -84,18 +84,20 @@ start_consul = <<SCRIPT
   echo '::Starting Consul ...'
   mkdir -p /etc/consul
   touch /etc/consul/consul.log
+  host=`hostname`
   hostname -I | grep -wq #{server_ip}
   if [ $? -eq 0 ]; then
     consul agent -server -bootstrap-expect=1 \
-        -data-dir=/tmp/consul -node=agent-1 -bind=#{server_ip} -client=#{server_ip} \
+        -data-dir=/tmp/consul -node=agent-$host -bind=#{server_ip} -client=#{server_ip} \
         -enable-script-checks=true -config-dir=/etc/consul.d  > /etc/consul/consul.log &
     echo export CONSUL_HTTP_ADDR=#{server_ip}:8500 >> /home/vagrant/.bashrc
   else
     ip=`hostname -I | awk '{print $2}'`
-    consul agent -data-dir=/tmp/consul -node=agent-$ip \
+    consul agent -data-dir=/tmp/consul -node=agent-$host \
     -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d  > /etc/consul/consul.log &
     echo export CONSUL_HTTP_ADDR=$ip:8500 >> /home/vagrant/.bashrc
-    source /home/vagrant/.bashrc
+    export CONSUL_HTTP_ADDR=$ip:8500
+    sleep 5
     consul join #{server_ip}
   fi
 SCRIPT

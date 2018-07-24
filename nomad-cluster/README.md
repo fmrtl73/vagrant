@@ -39,3 +39,18 @@ agent-a1  192.168.56.71:8301  alive   client  1.0.7  2         dc1  <default>
 agent-a2  192.168.56.72:8301  alive   client  1.0.7  2         dc1  <default>
 agent-a3  192.168.56.73:8301  alive   client  1.0.7  2         dc1  <default>
 ```
+
+You can use the mysql.nomad file to deploy MySql using Portworx as the volume provisioner:
+```
+vagrant@s1:~$ nomad job run mysql.nomad
+==> Monitoring evaluation "e1a924d2"
+    Evaluation triggered by job "mysql-server"
+    Allocation "5d92114f" created: node "5e1f3886", group "mysql-server"
+    Evaluation status changed: "pending" -> "complete"
+==> Evaluation "e1a924d2" finished with status "complete"
+vagrant@s1:~$ pxctl v l
+ID			NAME	SIZE	HA	SHARED	ENCRYPTED	IO_PRIORITY	STATUS					HA-STATE
+712387845893602906	mysql	10 GiB	3	no	no		LOW		up - attached on 192.168.56.71		Up
+```
+You can also see the ui for nomad:
+http://192.168.56.70:4646 

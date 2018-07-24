@@ -1,0 +1,6 @@
+.vagrant
+registry
+vagrantup.bat
+/vault
+/certs/localrancher*
+*.vdi

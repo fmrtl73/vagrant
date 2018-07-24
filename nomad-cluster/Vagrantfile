@@ -1,0 +1,251 @@
+1.11# -*- mode: ruby -*-
+# vim:ft=ruby:sw=3:et:
+
+vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
+   's1' => "192.168.56.70",
+   'a1' => "192.168.56.71",
+   'a2' => "192.168.56.72",
+   'a3' => "192.168.56.73"
+}
+# EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
+ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
+#ostype = ENV['KUBE_OSTYPE'] || 'centos7'
+
+# VM config, format: <type-label> => [ 0:vagrant-box, 1:vm-net-iface, 2:vm-disk-controller, 3:vm-start-port, 4:vm-drives-map ]
+# see https://atlas.hashicorp.com/search? for more VM images (ie. "box-names")
+vm_conf = {
+   'ubuntu16' => [ 'ubuntu/xenial64', 'enp0s8', 'SCSI', 2, { "sdc" => 15*1024, "sdd" => 20*1024 } ]
+ }
+
+# (internal variables)
+mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
+mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
+server_host, server_ip = vm_nodes.first()
+#
+# Install scriplets
+#
+# install_prereqs - usually run first, does the base packages install and configuration
+install_prereqs =  <<SCRIPT
+# Update apt and get dependencies
+sudo apt-get update
+sudo apt-get install -y jq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl vim \
+    apt-transport-https \
+    ca-certificates \
+    software-properties-common
+# Download Nomad
+NOMAD_VERSION=0.8.1
+echo "Fetching Nomad..."
+cd /tmp/
+curl -sSL https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip -o nomad.zip
+echo "Fetching Consul..."
+CONSUL_VERSION=1.0.7
+curl -sSL https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip > consul.zip
+echo "Installing Nomad..."
+unzip nomad.zip
+sudo install nomad /usr/bin/nomad
+sudo mkdir -p /etc/nomad.d
+sudo chmod a+w /etc/nomad.d
+# Set hostname's IP to made advertisement Just Work
+#sudo sed -i -e "s/.*nomad.*/$(ip route get 1 | awk '{print $NF;exit}') nomad/" /etc/hosts
+echo "Installing Docker..."
+if [[ -f /etc/apt/sources.list.d/docker.list ]]; then
+    echo "Docker repository already installed; Skipping"
+else
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+    sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+    sudo apt-get update
+fi
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce
+# Restart docker to make sure we get the latest version of the daemon if there is an upgrade
+sudo service docker restart
+# Make sure we can actually use docker as the vagrant user
+sudo usermod -aG docker vagrant
+echo "Installing Consul..."
+unzip consul.zip
+sudo chmod +x consul
+sudo mv consul /usr/bin/consul
+sudo mkdir /etc/consul.d
+sudo chmod a+w /etc/consul.d
+
+
+for bin in cfssl cfssl-certinfo cfssljson
+do
+	echo "Installing $bin..."
+	curl -sSL https://pkg.cfssl.org/R1.2/${bin}_linux-amd64 > /tmp/${bin}
+	sudo install /tmp/${bin} /usr/local/bin/${bin}
+done
+echo "Installing autocomplete..."
+nomad -autocomplete-install
+SCRIPT
+
+# start_consul
+start_consul = <<SCRIPT
+  echo '::Starting Consul ...'
+  mkdir -p /etc/consul
+  touch /etc/consul/consul.log
+  hostname -I | grep -wq #{server_ip}
+  if [ $? -eq 0 ]; then
+    consul agent -server -bootstrap-expect=1 \
+        -data-dir=/tmp/consul -node=agent-1 -bind=#{server_ip} -client=#{server_ip} \
+        -enable-script-checks=true -config-dir=/etc/consul.d  > /etc/consul/consul.log &
+    echo export CONSUL_HTTP_ADDR=#{server_ip}:8500 >> /home/vagrant/.bashrc
+  else
+    ip=`hostname -I | awk '{print $2}'`
+    consul agent -data-dir=/tmp/consul -node=agent-$ip \
+    -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d  > /etc/consul/consul.log &
+    echo export CONSUL_HTTP_ADDR=$ip:8500 >> /home/vagrant/.bashrc
+    source /home/vagrant/.bashrc
+    consul join #{server_ip}
+  fi
+SCRIPT
+
+# start_nomad
+start_nomad = <<SCRIPT
+  echo '::Starting Nomad ...'
+  hostname -I | grep -wq #{server_ip}
+  if [ $? -eq 0 ]; then
+    cat > /etc/nomad.d/server.hcl << _eof
+    # Increase log verbosity
+    log_level = "DEBUG"
+
+    # Setup data dir
+    data_dir = "/etc/nomad.d"
+    advertise {
+            http = "#{server_ip}"
+            rpc = "#{server_ip}"
+            serf = "#{server_ip}"
+    }
+    # Enable the server
+    server {
+        enabled = true
+        # Self-elect, should be 3 or 5 for production
+        bootstrap_expect = 1
+    }
+_eof
+    echo export NOMAD_ADDR=http://#{server_ip}:4646 >> /home/vagrant/.bashrc
+    source /home/vagrant/.bashrc
+    nomad agent -config /etc/nomad.d/server.hcl > /etc/nomad.d/nomad.log &
+  else
+    ip=`hostname -I | awk '{print $2}'`
+    host=`hostname`
+    cat > /etc/nomad.d/client.hcl << _eof
+    # Increase log verbosity
+    log_level = "DEBUG"
+
+    # Setup data dir
+    data_dir = "/etc/nomad.d"
+
+    # Give the agent a unique name. Defaults to hostname
+    name = "client-$host"
+    advertise {
+            http = "$ip"
+            rpc = "$ip"
+            serf = "$ip"
+    }
+    # Enable the client
+    client {
+        enabled = true
+
+        # For demo assume we are talking to server1. For production,
+        # this should be like "nomad.service.consul:4647" and a system
+        # like Consul used for service discovery.
+        servers = ["#{server_ip}:4647"]
+    }
+
+    # Modify our port to avoid a collision with server1
+    ports {
+        http = 5656
+    }
+_eof
+    echo export NOMAD_ADDR=http://$ip:4646 >> /home/vagrant/.bashrc
+    source /home/vagrant/.bashrc
+    nomad agent -config /etc/nomad.d/client.hcl > /etc/nomad.d/nomad.log &
+  fi
+SCRIPT
+
+
+# install_portworx_daemonset - installs the Portworx as a Kubernetes DaemoNset
+install_portworx = <<SCRIPT
+  echo ':: Installing Portworx ...'
+  latest_stable=$(curl -fsSL 'https://install.portworx.com/1.4/?type=dock&stork=false' | awk '/image: / {print $2}')
+
+  docker run --entrypoint /runc-entry-point.sh \
+      --rm -i --privileged=true \
+      -v /opt/pwx:/opt/pwx -v /etc/pwx:/etc/pwx \
+      $latest_stable
+
+  /opt/pwx/bin/px-runc install -c NOMAD_PX_CLUSTeR \
+      -k consul:http://192.168.56.70:8500 \
+      -a -d enp0s8 -m enp0s8
+
+  systemctl daemon-reload
+  systemctl enable portworx
+  systemctl start portworx
+SCRIPT
+
+#
+# VAGRANT SETUP
+#
+Vagrant.configure("2") do |config|
+
+   vm_nodes.each do |host,ip|
+      config.vm.define "#{host}" do |node|
+         node.vm.box = "#{mybox}"
+         node.vm.hostname = "#{host}"
+         node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
+	       node.disksize.size = "20GB"
+
+         node.vm.provider "virtualbox" do |v|
+            v.gui = false
+            v.memory = 4096
+
+            # Extra customizations
+            v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--chipset", "ich9"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--audio", "none"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--usb", "off"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--accelerate3d", "off"]
+            v.customize 'pre-boot', ["storagectl", :id, "--name", "#{mycntrl}", "--hostiocache", "on"]
+
+            # force Virtualbox to sync the time difference w/ threshold 10s (defl was 20 minutes)
+            v.customize [ "guestproperty", "set", :id, "/VirtualBox/GuestAdd/VBoxService/--timesync-set-threshold", 10000 ]
+
+            # Net boot speedup (see https://github.com/mitchellh/vagrant/issues/1807)
+            v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+            v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
+            if defined?(extra_disks)
+               # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
+               # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
+               port = myport
+               extra_disks.each do |hdd, size|
+                  vdisk_name = ".vagrant/#{host}_#{hdd}.vdi"
+                  unless File.exist?(vdisk_name)
+                     v.customize ['createhd', '--filename', vdisk_name, '--size', "#{size}"]
+                  end
+                  v.customize ['storageattach', :id, '--storagectl', "#{mycntrl}", '--port', port, '--device', 0, '--type', 'hdd', '--medium', vdisk_name]
+                  port = port + 1
+               end
+            end
+         end
+
+         # Custom post-install script below:
+         node.vm.provision "shell", inline: <<-SHELL
+            echo ':: Fixing ROOT access ...'
+            echo root:Password1 | chpasswd
+            sed -i -e 's/.*UseDNS.*/UseDNS no  # VAGRANT/' \
+               -e 's/.*PermitRootLogin.*/PermitRootLogin yes  # VAGRANT/' \
+               -e 's/.*PasswordAuthentication.*/PasswordAuthentication yes  # VAGRANT/' \
+               /etc/ssh/sshd_config && systemctl restart sshd
+
+_eof
+
+            #{install_prereqs}
+            #{start_consul}
+            #{start_nomad}
+            #{install_portworx}
+         SHELL
+      end
+   end
+end

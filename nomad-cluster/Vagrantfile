@@ -14,214 +14,262 @@ ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
 # VM config, format: <type-label> => [ 0:vagrant-box, 1:vm-net-iface, 2:vm-disk-controller, 3:vm-start-port, 4:vm-drives-map ]
 # see https://atlas.hashicorp.com/search? for more VM images (ie. "box-names")
 vm_conf = {
-   'ubuntu16' => [ 'ubuntu/xenial64', 'enp0s8', 'SCSI', 2, { "sdc" => 15*1024, "sdd" => 20*1024 } ]
+   'ubuntu16' => [ 'ubuntu/xenial64', 'enp0s8', 'SCSI', 2, { "sdc" => 20*1024, "sdd" => 20*1024 } ]
  }
 
 # (internal variables)
 mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
 mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
-server_host, server_ip = vm_nodes.first()
-consul_hosts = ""
-host_count=0
-vm_nodes.each do |host,ip|
-   consul_hosts += "consul:http://#{ip}:8500,"
-   host_count = host_count + 1
-end
-consul_hosts = consul_hosts[0,consul_hosts.rindex(",")]
 #
 # Install scriplets
 #
 # install_prereqs - usually run first, does the base packages install and configuration
 install_prereqs =  <<SCRIPT
-# Update apt and get dependencies
-sudo apt-get update
-sudo apt-get install -y jq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl vim \
-    apt-transport-https \
-    ca-certificates \
-    software-properties-common
-# Download Nomad
-NOMAD_VERSION=0.8.1
-echo "Fetching Nomad..."
-cd /tmp/
-curl -sSL https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip -o nomad.zip
-echo "Fetching Consul..."
-CONSUL_VERSION=1.0.7
-curl -sSL https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip > consul.zip
-echo "Installing Nomad..."
-unzip nomad.zip
-sudo install nomad /usr/bin/nomad
-sudo mkdir -p /etc/nomad.d
-sudo chmod a+w /etc/nomad.d
-# Set hostname's IP to made advertisement Just Work
-#sudo sed -i -e "s/.*nomad.*/$(ip route get 1 | awk '{print $NF;exit}') nomad/" /etc/hosts
-echo "Installing Docker..."
-if [[ -f /etc/apt/sources.list.d/docker.list ]]; then
-    echo "Docker repository already installed; Skipping"
-else
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-    sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-    sudo apt-get update
-fi
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce
-# Restart docker to make sure we get the latest version of the daemon if there is an upgrade
-sudo service docker restart
-# Make sure we can actually use docker as the vagrant user
-sudo usermod -aG docker vagrant
-echo "Installing Consul..."
-unzip consul.zip
-sudo chmod +x consul
-sudo mv consul /usr/bin/consul
-sudo mkdir /etc/consul.d
-sudo chmod a+w /etc/consul.d
+  # Update apt and get dependencies
+  sudo apt-get update
+  sudo apt-get install -y jq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl vim \
+      apt-transport-https \
+      ca-certificates \
+      software-properties-common
+  # Download Nomad
+  NOMAD_VERSION=0.8.4
+  echo "Fetching Nomad..."
+  cd /tmp/
+  curl -sSL https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip -o nomad.zip
+  echo "Fetching Consul..."
+  CONSUL_VERSION=1.2.1
+  curl -sSL https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip > consul.zip
+  echo "Installing Nomad..."
+  unzip nomad.zip
+  sudo install nomad /usr/bin/nomad
+  sudo mkdir -p /etc/nomad.d
+  sudo chmod a+w /etc/nomad.d
+  # Set hostname's IP to made advertisement Just Work
+  #sudo sed -i -e "s/.*nomad.*/$(ip route get 1 | awk '{print $NF;exit}') nomad/" /etc/hosts
+  echo "Installing Docker..."
+  if [[ -f /etc/apt/sources.list.d/docker.list ]]; then
+      echo "Docker repository already installed; Skipping"
+  else
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+      sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+      sudo apt-get update
+  fi
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce
+  # Restart docker to make sure we get the latest version of the daemon if there is an upgrade
+  sudo service docker restart
+  # Make sure we can actually use docker as the vagrant user
+  sudo usermod -aG docker vagrant
+  echo "Installing Consul..."
+  unzip consul.zip
+  sudo chmod +x consul
+  sudo mv consul /usr/bin/consul
+  sudo mkdir /etc/consul.d
+  sudo chmod a+w /etc/consul.d
 
 
-for bin in cfssl cfssl-certinfo cfssljson
-do
-	echo "Installing $bin..."
-	curl -sSL https://pkg.cfssl.org/R1.2/${bin}_linux-amd64 > /tmp/${bin}
-	sudo install /tmp/${bin} /usr/local/bin/${bin}
-done
-echo "Installing autocomplete..."
-nomad -autocomplete-install
+  for bin in cfssl cfssl-certinfo cfssljson
+  do
+  	echo "Installing $bin..."
+  	curl -sSL https://pkg.cfssl.org/R1.2/${bin}_linux-amd64 > /tmp/${bin}
+  	sudo install /tmp/${bin} /usr/local/bin/${bin}
+  done
+  echo "Installing autocomplete..."
+  nomad -autocomplete-install
 SCRIPT
 
-# start_consul
-start_consul = <<SCRIPT
+# start_consul_server
+start_consul_server = <<SCRIPT
   echo '::Starting Consul ...'
-  mkdir -p /etc/consul
-  touch /etc/consul/consul.log
   host=`hostname`
-  hostname -I | grep -wq #{server_ip}
-  if [ $? -eq 0 ]; then
-    cat > /etc/systemd/system/consul-server.service << _eof
-    [Unit]
-    Description=consul server
-    Wants=network-online.target
-    After=network-online.target
-    [Service]
-    Type=notify
-    ExecStart=/usr/bin/consul agent -server -bootstrap-expect=#{host_count} -data-dir=/etc/consul.d -node=agent-$host -bind=#{server_ip} -client=#{server_ip} -enable-script-checks=true -config-dir=/etc/consul.d
-    Restart=alwaysRestartSec=10
-    [Install]
-    WantedBy=multi-user.targetIntroduction
+  ip=`hostname -I | awk '{print $2}'`
+  cat > /etc/systemd/system/consul-server.service << _eof
+  [Unit]
+  Description=consul server
+  Wants=network-online.target
+  After=network-online.target
+  [Service]
+  Type=notify
+  ExecStart=/usr/bin/consul agent -server -bootstrap-expect=1 -data-dir=/etc/consul.d -node=agent-$host -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d -retry-join #{vm_nodes.first()[1]}
+  Restart=always
+  RestartSec=10
+  [Install]
+  WantedBy=multi-user.target
 _eof
-    echo export CONSUL_HTTP_ADDR=#{server_ip}:8500 >> /home/vagrant/.bashrc
-    sudo systemctl enable consul-server.service
-    sudo systemctl start consul-server.service
-  else
-    ip=`hostname -I | awk '{print $2}'`
-    cat > /etc/systemd/system/consul-server.service << _eof
-    [Unit]
-    Type=notify
-    Description=consul server
-    Wants=network-online.target
-    After=network-online.target
-    [Service]
-    ExecStart=/usr/bin/consul agent -server -bootstrap-expect=#{host_count} -data-dir=/etc/consul.d -node=agent-$host -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d -retry-join #{server_ip}
-    Restart=alwaysRestartSec=10
-    [Install]
-    WantedBy=multi-user.targetIntroduction
-_eof
-    echo export CONSUL_HTTP_ADDR=#{server_ip}:8500 >> /home/vagrant/.bashrc
-    sudo systemctl enable consul-server.service
-    sudo systemctl start consul-server.service
-  fi
+  echo export CONSUL_HTTP_ADDR=$ip:8500 >> /home/vagrant/.bashrc
+  sudo systemctl enable consul-server.service
+  sudo systemctl start consul-server.service
 SCRIPT
 
-# start_nomad
-start_nomad = <<SCRIPT
-  echo '::Starting Nomad ...'
-  hostname -I | grep -wq #{server_ip}
-  if [ $? -eq 0 ]; then
-    cat > /etc/nomad.d/server.hcl << _eof
-    # Increase log verbosity
-    log_level = "DEBUG"
-
-    # Setup data dir
-    data_dir = "/etc/nomad.d"
-    advertise {
-            http = "#{server_ip}"
-            rpc = "#{server_ip}"
-            serf = "#{server_ip}"
-    }
-    # Enable the server
-    server {
-        enabled = true
-        # Self-elect, should be 3 or 5 for production
-        bootstrap_expect = 1
-    }
+# start_consul_client
+start_consul_client = <<SCRIPT
+  echo '::Starting Consul ...'
+  host=`hostname`
+  ip=`hostname -I | awk '{print $2}'`
+  cat > /etc/systemd/system/consul-client.service << _eof
+  [Unit]
+  Description=consul client
+  Wants=network-online.target
+  After=network-online.target
+  [Service]
+  Type=notify
+  ExecStart=/usr/bin/consul agent -data-dir=/etc/consul.d -node=agent-$host -bind=$ip -client=$ip -enable-script-checks=true -config-dir=/etc/consul.d -join=#{vm_nodes.first()[1]}
+  Restart=always
+  RestartSec=10
+  [Install]
+  WantedBy=multi-user.target
 _eof
-    cat > /etc/systemd/system/nomad-server.service << _eof
-    [Unit]
-    Description=Nomad server
-    Wants=network-online.target
-    After=network-online.target
-    [Service]
-    ExecStart=/usr/bin/nomad agent -config=/etc/nomad.d/server.hcl
-    Restart=always
-    RestartSec=10
-    [Install]
-    WantedBy=multi-user.target
+  echo export CONSUL_HTTP_ADDR=$ip:8500 >> /home/vagrant/.bashrc
+  sudo systemctl enable consul-client.service
+  sudo systemctl start consul-client.service
+SCRIPT
+
+# start_vault
+start_vault = <<SCRIPT
+  echo '::Starting Vault ...'
+  VAULT_VERSION="0.10.4"
+  cd /tmp
+  curl -sSL https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip > vault.zip
+  unzip vault.zip && mv vault /usr/bin && rm vault.zip
+  chmod +x /usr/bin/vault
+  mkdir /etc/vault.d
+  cat > /etc/vault.d/vault.hcl << _eof
+  storage "consul" {
+    address = "#{vm_nodes.first()[1]}:8500"
+    path    = "vault"
+  }
+
+  listener "tcp" {
+    address     = "#{vm_nodes.first()[1]}:8200"
+    tls_disable = 1
+  }
 _eof
-    echo export NOMAD_ADDR=http://#{server_ip}:4646 >> /home/vagrant/.bashrc
-    source /home/vagrant/.bashrc
-    sudo systemctl enable nomad-server.service
-    sudo systemctl start nomad-server.service
-  else
-    ip=`hostname -I | awk '{print $2}'`
-    host=`hostname`
-    cat > /etc/nomad.d/client.hcl << _eof
-    # Increase log verbosity
-    log_level = "DEBUG"
-
-    # Setup data dir
-    data_dir = "/etc/nomad.d"
-
-    # Give the agent a unique name. Defaults to hostname
-    name = "client-$host"
-    advertise {
-            http = "$ip"
-            rpc = "$ip"
-            serf = "$ip"
-    }
-    # Enable the client
-    client {
-        enabled = true
-
-        # For demo assume we are talking to server1. For production,
-        # this should be like "nomad.service.consul:4647" and a system
-        # like Consul used for service discovery.
-        servers = ["#{server_ip}:4647"]
-    }
-
-    # Modify our port to avoid a collision with server1
-    ports {
-        http = 5656
-    }
+  cat > /etc/systemd/system/vault-server.service << _eof
+  [Unit]
+  Description=HashiCorp Vault Server
+  After=consul-server.service
+  Requires=consul-server.service
+  [Service]
+  ExecStart=/usr/bin/vault server -config /etc/vault.d/vault.hcl
+  ExecReload=/bin/kill -HUP $MAINPID
+  KillSignal=SIGINT
+  Restart=always
+  RestartSec=20
+  TimeoutStartSec=2
+  [Install]
+  WantedBy=multi-user.target
 _eof
-    cat > /etc/systemd/system/nomad-client.service << _eof
-    [Unit]
-    Description=Nomad client
-    Wants=network-online.target
-    After=network-online.target
-    [Service]
-    ExecStart=/usr/bin/nomad agent -config /etc/nomad.d/client.hcl
-    Restart=always
-    RestartSec=10
-    [Install]
-    WantedBy=multi-user.target
+  echo export VAULT_ADDR=http://$ip:8200 >> /home/vagrant/.bashrc
+  sudo systemctl enable vault-server.service
+  sudo systemctl start vault-server.service
+  sleep 5
+  export VAULT_ADDR=http://$ip:8200
+  export CONSUL_HTTP_ADDR=$ip:8500
+  vault operator init -address http://$ip:8200 -format=json >> vault-init.json
+  for key in `jq -r ".unseal_keys_b64[] | ." vault-init.json` ; do vault operator unseal $key; done
+  vault login `jq -r .root_token vault-init.json`
+  consul kv put px-vault-token `vault token create -format=json | jq -r .auth.client_token`
+SCRIPT
+#
+=begin
+KEYS=`vault operator init -format=json | jq -r .unseal_keys_b64`
+for key in $KEYS; do vault unseal $CERT $key; done
+vault token create -format=json | jq -r .auth.client_token
+=end
+# start_nomad_server
+start_nomad_server = <<SCRIPT
+  echo '::Starting Nomad Server...'
+  cat > /etc/nomad.d/server.hcl << _eof
+  # Increase log verbosity
+  log_level = "DEBUG"
+
+  # Setup data dir
+  data_dir = "/etc/nomad.d"
+  advertise {
+          http = "#{vm_nodes.first()[1]}"
+          rpc = "#{vm_nodes.first()[1]}"
+          serf = "#{vm_nodes.first()[1]}"
+  }
+  # Enable the server
+  server {
+      enabled = true
+      # Self-elect, should be 3 or 5 for production
+      bootstrap_expect = 1
+  }
 _eof
-    echo export NOMAD_ADDR=http://$ip:4646 >> /home/vagrant/.bashrc
-    sudo systemctl enable nomad-client.service
-    sudo systemctl start nomad-client.service
-  fi
+  cat > /etc/systemd/system/nomad-server.service << _eof
+  [Unit]
+  Description=Nomad server
+  Wants=network-online.target
+  After=network-online.target
+  [Service]
+  ExecStart=/usr/bin/nomad agent -config=/etc/nomad.d/server.hcl
+  Restart=always
+  RestartSec=10
+  [Install]
+  WantedBy=multi-user.target
+_eof
+  echo export NOMAD_ADDR=http://#{vm_nodes.first()[1]}:4646 >> /home/vagrant/.bashrc
+  source /home/vagrant/.bashrc
+  sudo systemctl enable nomad-server.service
+  sudo systemctl start nomad-server.service
+SCRIPT
+
+# start_nomad client
+start_nomad_client = <<SCRIPT
+  ip=`hostname -I | awk '{print $2}'`
+  host=`hostname`
+  cat > /etc/nomad.d/client.hcl << _eof
+  # Increase log verbosity
+  log_level = "DEBUG"
+
+  # Setup data dir
+  data_dir = "/etc/nomad.d"
+
+  # Give the agent a unique name. Defaults to hostname
+  name = "client-$host"
+  advertise {
+          http = "$ip"
+          rpc = "$ip"
+          serf = "$ip"
+  }
+  # Enable the client
+  client {
+      enabled = true
+
+      # For demo assume we are talking to server1. For production,
+      # this should be like "nomad.service.consul:4647" and a system
+      # like Consul used for service discovery.
+      servers = ["#{vm_nodes.first()[1]}:4647"]
+  }
+
+  # Modify our port to avoid a collision with server1
+  ports {
+      http = 5656
+  }
+_eof
+  cat > /etc/systemd/system/nomad-client.service << _eof
+  [Unit]
+  Description=Nomad client
+  Wants=network-online.target
+  After=network-online.target
+  [Service]
+  ExecStart=/usr/bin/nomad agent -config /etc/nomad.d/client.hcl
+  Restart=always
+  RestartSec=10
+  [Install]
+  WantedBy=multi-user.target
+_eof
+  echo export NOMAD_ADDR=http://$ip:4646 >> /home/vagrant/.bashrc
+  sudo systemctl enable nomad-client.service
+  sudo systemctl start nomad-client.service
 SCRIPT
 
 
 # install_portworx_daemonset - installs the Portworx as a Kubernetes DaemoNset
 install_portworx = <<SCRIPT
   echo ':: Installing Portworx ...'
+  export CONSUL_HTTP_ADDR=http://`hostname -I | awk '{print $2}'`:8500
   latest_stable=$(curl -fsSL 'https://install.portworx.com/1.4/?type=dock&stork=false' | awk '/image: / {print $2}')
 
   docker run --entrypoint /runc-entry-point.sh \
@@ -230,8 +278,8 @@ install_portworx = <<SCRIPT
       $latest_stable
 
   /opt/pwx/bin/px-runc install -c NOMAD_PX_CLUSTeR \
-      -k #{consul_hosts} \
-      -a -d enp0s8 -m enp0s8
+      -k "consul:http://#{vm_nodes.first()[1]}:8500" \
+      -a -d enp0s8 -m enp0s8 -secret_type vault -cluster_secret_key `consul kv get px-vault-token`
 
   systemctl daemon-reload
   systemctl enable portworx
@@ -252,8 +300,11 @@ Vagrant.configure("2") do |config|
 
          node.vm.provider "virtualbox" do |v|
             v.gui = false
-            v.memory = 4096
-
+            if host == "s1"
+              v.memory = 1024
+            else
+              v.memory = 4096
+            end
             # Extra customizations
             v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
             v.customize 'pre-boot', ["modifyvm", :id, "--chipset", "ich9"]
@@ -294,12 +345,22 @@ Vagrant.configure("2") do |config|
                /etc/ssh/sshd_config && systemctl restart sshd
 
 _eof
-
             #{install_prereqs}
-            #{start_consul}
-            #{start_nomad}
+            SHELL
+
+          if host == vm_nodes.first()[0] # install Nomad server, Vault and Consul
+             node.vm.provision "shell", inline: <<-SHELL
+             #{start_consul_server}
+             #{start_nomad_server}
+             #{start_vault}
+             SHELL
+          else
+            node.vm.provision "shell", inline: <<-SHELL
+            #{start_consul_client}
+            #{start_nomad_client}
             #{install_portworx}
-         SHELL
+            SHELL
+          end
       end
    end
 end

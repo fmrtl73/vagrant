@@ -177,7 +177,11 @@ install_portworx_daemonset = <<SCRIPT
 hostname -I | grep -wq #{k8s_master_ip}
 if [ $? -eq 0 ]; then
    echo ':: Installing Portworx DaemonSet ...'
+<<<<<<< HEAD
    curl -o px-spec.yaml "https://install.portworx.com/?kbver=1.11.1&k=etcd%3Ahttp%3A%2F%2F#{k8s_master_ip}:2379&j=auto&m=#{myvmif}&d=#{myvmif}&c=px-cluster-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&lh=true&st=k8s"
+=======
+   curl -Lo px-spec.yaml "http://install.portworx.com/1.4/?c=mycluster&k=etcd://#{k8s_master_ip}:2379&kbver=1.10.5&m=#{myvmif}&d=#{myvmif}&s=#{mystorage}&st=kvdb"
+>>>>>>> 98b191507da87791af8ef64718e7e5bd338a4f1f
    kubectl apply -f px-spec.yaml
    echo "alias kc='kubectl'" >> /user/vagrant/home/.bashrc
    echo "alias ks='kubectl -n kube-system'" >> /user/vagrant/home/.bashrc

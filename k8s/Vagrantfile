@@ -105,7 +105,7 @@ if [ -d /etc/apt/sources.list.d ]; then # ----> Ubuntu/Debian distro
    echo "deb http://apt.kubernetes.io/ kubernetes-$(lsb_release -cs) main" \
       > /etc/apt/sources.list.d/kubernetes.list
    #apt-get update && apt-get install -y kubelet kubeadm kubectl kubernetes-cni
-   apt-get update && apt-get install -y kubelet=1.10.5-00 kubeadm=1.10.5-00 kubectl=1.10.5-00 kubernetes-cni
+   apt-get update && apt-get install -y kubelet=1.11.1-00 kubeadm=1.11.1-00 kubectl=1.11.1-00 kubernetes-cni
 elif [ -d /etc/yum.repos.d ]; then      # ----> CentOS/RHEL distro
    cat > /etc/yum.repos.d/kubernetes.repo << _eof
 [kubernetes]
@@ -118,7 +118,7 @@ gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
        https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
 _eof
 
-   yum install -y yum-plugin-versionlock kubelet-1.10.5-0 kubeadm-1.10.5-0 kubectl-1.10.5-0 kubernetes-cni
+   yum install -y yum-plugin-versionlock kubelet-1.11.1-0 kubeadm-1.11.1-0 kubectl-1.11.1-0 kubernetes-cni
    yum versionlock "kube*"
    #yum install -y kubelet kubeadm kubectl kubernetes-cni
 else    # ------------------------------------> (unsuported)
@@ -177,7 +177,7 @@ install_portworx_daemonset = <<SCRIPT
 hostname -I | grep -wq #{k8s_master_ip}
 if [ $? -eq 0 ]; then
    echo ':: Installing Portworx DaemonSet ...'
-   curl -o px-spec.yaml "http://install.portworx.com/1.4/?c=mycluster&k=etcd://#{k8s_master_ip}:2379&kbver=1.10.5&m=#{myvmif}&d=#{myvmif}&s=#{mystorage}&st=kvdb"
+   curl -o px-spec.yaml "https://install.portworx.com/?kbver=1.11.1&k=etcd%3Ahttp%3A%2F%2F#{k8s_master_ip}:2379&j=auto&m=#{myvmif}&d=#{myvmif}&c=px-cluster-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&lh=true&st=k8s"
    kubectl apply -f px-spec.yaml
    echo "alias kc='kubectl'" >> /user/vagrant/home/.bashrc
    echo "alias ks='kubectl -n kube-system'" >> /user/vagrant/home/.bashrc

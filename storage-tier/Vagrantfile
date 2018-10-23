@@ -197,21 +197,21 @@ sudo docker run --entrypoint /runc-entry-point.sh \
 
 sudo /opt/pwx/bin/px-runc install -c stretch \
     -k etcd://10.0.1.70:2379 \
-    -s /dev/xvdb -s /dev/x
+    -s /dev/sdc \
+    -d enp0s9 \
+    -m enp0s9
 
     sudo systemctl daemon-reload
     sudo systemctl enable portworx
     sudo systemctl start portworx    
 SCRIPT
 
-
-
 # install_portworx_daemonset - installs the Portworx as a Kubernetes DaemoNset
 install_portworx_daemonset = <<SCRIPT
 hostname -I | grep -wq #{k8s_master_ip}
 if [ $? -eq 0 ]; then
    echo ':: Installing Portworx DaemonSet ...'
-   curl -o px-spec.yaml "https://install.portworx.com/?kbver=1.11.1&k=etcd%3Ahttp%3A%2F%2F#10.0.1.70:2379&z=true&m=#{myvmif}&d=#{myvmif}&c=stretch&lh=true&st=k8s"
+   curl -Lo px-spec.yaml "https://gist.githubusercontent.com/grdnrio/bdf6de0a0fbc4e3467ce465a2cd6e625/raw/19eaf107e7b3bdc08f45ca3df6cfaf22850e2344/px-spec.yaml"
    kubectl apply -f px-spec.yaml
    echo "alias kc='kubectl'" >> /user/vagrant/home/.bashrc
    echo "alias ks='kubectl -n kube-system'" >> /user/vagrant/home/.bashrc
@@ -235,7 +235,7 @@ Vagrant.configure("2") do |config|
     
            node.vm.provider "virtualbox" do |v|
               v.gui = false
-              v.memory = 2048
+              v.memory = 4096
     
               # Extra customizations
               v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
@@ -379,20 +379,6 @@ _eof
             # Net boot speedup (see https://github.com/mitchellh/vagrant/issues/1807)
             v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
             v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
-
-            if defined?(extra_disks)
-               # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
-               # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
-               port = myport
-               extra_disks.each do |hdd, size|
-                  vdisk_name = ".vagrant/#{host}_#{hdd}.vdi"
-                  unless File.exist?(vdisk_name)
-                     v.customize ['createhd', '--filename', vdisk_name, '--size', "#{size}"]
-                  end
-                  v.customize ['storageattach', :id, '--storagectl', "#{mycntrl}", '--port', port, '--device', 0, '--type', 'hdd', '--medium', vdisk_name]
-                  port = port + 1
-               end
-            end
          end
 
          # Custom post-install script below:

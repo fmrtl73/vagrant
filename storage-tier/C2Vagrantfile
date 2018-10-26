@@ -2,20 +2,10 @@
 # vim:ft=ruby:sw=3:et:
 
 vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
-   'c1-k1m' => "192.168.56.70",
-   'c1-k1n1' => "192.168.56.71",
-   'c1-k1n2' => "192.168.56.72",
-   'c1-k1n3' => "192.168.56.73"
-}
-
-storage_nodes = {
-   'stor1' => "192.168.56.80",
-   'stor2' => "192.168.56.81",
-   'stor3' => "192.168.56.82"
-}
-
-etcd_nodes = {
-   'etcd1' => "192.168.56.90"
+   'c2-k1m' => "192.168.60.70",
+   'c2-k1n1' => "192.168.60.71",
+   'c2-k1n2' => "192.168.60.72",
+   'c2-k1n3' => "192.168.60.73"
 }
 
 # EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
@@ -36,7 +26,7 @@ etcd_pub = "10.0.1.80"
 mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
 mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
 k8s_master_host, k8s_master_ip = vm_nodes.first()
-k8s_cidr, k8s_token, etc_hosts = "192.168.56.0/24", "030ffd.5d7a97b7e0d23ba9", ""
+k8s_cidr, k8s_token, etc_hosts = "192.168.60.0/24", "030ffd.5d7a97b7e0d23ba0", ""
 vm_nodes.each do |host,ip|
    etc_hosts += "\n#{ip}\t#{host}"
 end
@@ -95,40 +85,6 @@ PermissionsStartOnly=true
 Environment=ETCD_NAME=%H
 EnvironmentFile=-/etc/default/%p
 ExecStart=/usr/local/bin/etcd --advertise-client-urls 'http://localhost:2379,http://#{k8s_master_ip}:2379' --listen-client-urls 'http://0.0.0.0:2379' --data-dir /var/lib/etcd/default
-Restart=on-abnormal
-RestartSec=10s
-LimitNOFILE=40000
-
-[Install]
-WantedBy=multi-user.target
-_eof
-   systemctl enable etcd
-   systemctl restart etcd
-else
-   echo '(skipping install of Etcd on this node)'
-fi
-SCRIPT
-
-# install_etcd_sa - installs the Etcd v3 key/value database standalone install, shared between Portworx clusters
-install_etcd_sa = <<SCRIPT
-hostname -I | grep -wq #{etcd_pub}
-if [ $? -eq 0 ]; then
-   echo ':: Installing Etcd k/v database ...'
-   curl -fsSL https://github.com/coreos/etcd/releases/download/v3.3.8/etcd-v3.3.8-linux-amd64.tar.gz | \
-      tar -xvz --strip=1 -f - -C /usr/local/bin etcd-v3.3.8-linux-amd64/etcdctl etcd-v3.3.8-linux-amd64/etcd
-   useradd -d /var/lib/etcd -s /bin/false -m etcd
-   cat > /lib/systemd/system/etcd.service << _eof
-[Unit]
-Description=etcd key-value store
-After=network.target
-
-[Service]
-User=etcd
-Type=notify
-PermissionsStartOnly=true
-Environment=ETCD_NAME=%H
-EnvironmentFile=-/etc/default/%p
-ExecStart=/usr/local/bin/etcd --advertise-client-urls 'http://localhost:2379,http://#{etcd_pub}:2379' --listen-client-urls 'http://0.0.0.0:2379' --data-dir /var/lib/etcd/default
 Restart=on-abnormal
 RestartSec=10s
 LimitNOFILE=40000
@@ -219,28 +175,6 @@ else
 fi
 SCRIPT
 
-# install_portworx - installs the Portworx standalone on the storage nodes
-install_portworx = <<SCRIPT
-REL="/1.6"     # 1.6 portworx release
-
-latest_stable=$(curl -fsSL "https://install.portworx.com$REL/?type=dock&stork=false" | awk '/image: / {print $2}')
-
-sudo docker run --entrypoint /runc-entry-point.sh \
-    --rm -i --privileged=true \
-    -v /opt/pwx:/opt/pwx -v /etc/pwx:/etc/pwx \
-    $latest_stable
-
-sudo /opt/pwx/bin/px-runc install -c stretch \
-    -k etcd://#{etcd_pub}:2379 \
-    -s /dev/sdc \
-    -d enp0s9 \
-    -m enp0s9
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable portworx
-    sudo systemctl start portworx    
-SCRIPT
-
 
 # install_portworx_daemonset - installs the Portworx as a Kubernetes DaemoNset
 install_portworx_daemonset = <<SCRIPT
@@ -261,129 +195,6 @@ SCRIPT
 #
 Vagrant.configure("2") do |config|
 
-    etcd_nodes.each do |host,ip|
-        config.vm.define "#{host}" do |node|
-           node.vm.box = "#{mybox}"
-           node.vm.hostname = "#{host}"
-           node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
-           node.vm.network "public_network", ip: "#{etcd_pub}", bridge: "en0: Ethernet"
-    
-           node.vm.provider "virtualbox" do |v|
-              v.gui = false
-              v.memory = 4096
-    
-              # Extra customizations
-              v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--chipset", "ich9"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--audio", "none"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--usb", "off"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--accelerate3d", "off"]
-              v.customize 'pre-boot', ["storagectl", :id, "--name", "#{mycntrl}", "--hostiocache", "on"]
-    
-              # force Virtualbox to sync the time difference w/ threshold 10s (defl was 20 minutes)
-              v.customize [ "guestproperty", "set", :id, "/VirtualBox/GuestAdd/VBoxService/--timesync-set-threshold", 10000 ]
-    
-              # Net boot speedup (see https://github.com/mitchellh/vagrant/issues/1807)
-              v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
-              v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
-    
-              if defined?(extra_disks)
-                 # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
-                 # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
-                 port = myport
-                 extra_disks.each do |hdd, size|
-                    vdisk_name = ".vagrant/#{host}_#{hdd}.vdi"
-                    unless File.exist?(vdisk_name)
-                       v.customize ['createhd', '--filename', vdisk_name, '--size', "#{size}"]
-                    end
-                    v.customize ['storageattach', :id, '--storagectl', "#{mycntrl}", '--port', port, '--device', 0, '--type', 'hdd', '--medium', vdisk_name]
-                    port = port + 1
-                 end
-              end
-           end
-    
-           # Custom post-install script below:
-           node.vm.provision "shell", inline: <<-SHELL
-              echo ':: Fixing ROOT access ...'
-              echo root:Password1 | chpasswd
-              sed -i -e 's/.*UseDNS.*/UseDNS no  # VAGRANT/' \
-                 -e 's/.*PermitRootLogin.*/PermitRootLogin yes  # VAGRANT/' \
-                 -e 's/.*PasswordAuthentication.*/PasswordAuthentication yes  # VAGRANT/' \
-                 /etc/ssh/sshd_config && systemctl restart sshd
-    
-              echo ':: Fixing /etc/hosts ...'
-              sed -i -e 's/.*#{host}.*/# \\0  # VAGRANT/' /etc/hosts
-              cat << _eof >> /etc/hosts
-#{etc_hosts}
-_eof
-    
-              #{install_prereqs}
-              #{install_etcd_sa}
-    
-           SHELL
-        end
-     end
-   
-     storage_nodes.each do |host,ip|
-        config.vm.define "#{host}" do |node|
-           node.vm.box = "#{mybox}"
-           node.vm.hostname = "#{host}"
-           node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
-           node.vm.network "public_network", bridge: "en0: Ethernet"
-           node.disksize.size = "30GB"
-    
-           node.vm.provider "virtualbox" do |v|
-              v.gui = false
-              v.memory = 2048
-    
-              # Extra customizations
-              v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--chipset", "ich9"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--audio", "none"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--usb", "off"]
-              v.customize 'pre-boot', ["modifyvm", :id, "--accelerate3d", "off"]
-              v.customize 'pre-boot', ["storagectl", :id, "--name", "#{mycntrl}", "--hostiocache", "on"]
-    
-              # force Virtualbox to sync the time difference w/ threshold 10s (defl was 20 minutes)
-              v.customize [ "guestproperty", "set", :id, "/VirtualBox/GuestAdd/VBoxService/--timesync-set-threshold", 10000 ]
-    
-              # Net boot speedup (see https://github.com/mitchellh/vagrant/issues/1807)
-              v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
-              v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
-    
-              if defined?(extra_disks)
-                 # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
-                 # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
-                 port = myport
-                 extra_disks.each do |hdd, size|
-                    vdisk_name = ".vagrant/#{host}_#{hdd}.vdi"
-                    unless File.exist?(vdisk_name)
-                       v.customize ['createhd', '--filename', vdisk_name, '--size', "#{size}"]
-                    end
-                    v.customize ['storageattach', :id, '--storagectl', "#{mycntrl}", '--port', port, '--device', 0, '--type', 'hdd', '--medium', vdisk_name]
-                    port = port + 1
-                 end
-              end
-           end
-    
-           # Custom post-install script below:
-           node.vm.provision "shell", inline: <<-SHELL
-              echo ':: Fixing ROOT access ...'
-              echo root:Password1 | chpasswd
-              sed -i -e 's/.*UseDNS.*/UseDNS no  # VAGRANT/' \
-                 -e 's/.*PermitRootLogin.*/PermitRootLogin yes  # VAGRANT/' \
-                 -e 's/.*PasswordAuthentication.*/PasswordAuthentication yes  # VAGRANT/' \
-                 /etc/ssh/sshd_config && systemctl restart sshd
-        
-              #{install_prereqs}
-              #{install_docker}
-              #{install_portworx}
-    
-           SHELL
-        end
-     end
-   
-   
     vm_nodes.each do |host,ip|
       config.vm.define "#{host}" do |node|
          node.vm.box = "#{mybox}"

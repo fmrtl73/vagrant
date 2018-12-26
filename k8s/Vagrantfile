@@ -159,7 +159,7 @@ token: #{k8s_token}
 networking:
   podSubnet: #{k8s_cidr}
 _eof
-   kubeadm init --config /etc/kubernetes/vagrant.yaml
+   kubeadm init --ignore-preflight-errors=SystemVerification --config /etc/kubernetes/vagrant.yaml
    export KUBECONFIG=/etc/kubernetes/admin.conf
    echo "WARNING: Making $KUBECONFIG public (not reccommended for production!!)" >&2
    chmod a+r $KUBECONFIG && echo "export KUBECONFIG=$KUBECONFIG" >> /etc/profile.d/k8s_vagrant.sh

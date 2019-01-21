@@ -236,7 +236,11 @@ start_nomad_client = <<SCRIPT
   # Enable the client
   client {
       enabled = true
-
+      network_interface= "#{myvmif}"
+      options {
+        "driver.exec.enable" = "1"
+        "driver.raw_exec.enable" = "1"
+      }
       # For demo assume we are talking to server1. For production,
       # this should be like "nomad.service.consul:4647" and a system
       # like Consul used for service discovery.
@@ -270,7 +274,7 @@ SCRIPT
 install_portworx = <<SCRIPT
   echo ':: Installing Portworx ...'
   export CONSUL_HTTP_ADDR=http://`hostname -I | awk '{print $2}'`:8500
-  latest_stable=$(curl -fsSL 'https://install.portworx.com/1.4/?type=dock&stork=false' | awk '/image: / {print $2}')
+  latest_stable=$(curl -fsSL 'https://install.portworx.com/2.0/?type=dock&stork=false' | awk '/image: / {print $2}')
 
   docker run --entrypoint /runc-entry-point.sh \
       --rm -i --privileged=true \

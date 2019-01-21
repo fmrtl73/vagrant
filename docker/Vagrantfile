@@ -59,7 +59,7 @@ SCRIPT
 
 # install_etcd_v3 - installs the Etcd v3 key/value database (standalone install, shared between Portworx and Kubernetes)
 install_etcd_v3 = <<SCRIPT
-hostname -I | grep -wq #{d1_ip}
+hostname -I | grep -wq #{d1_ip}-dontdoit
 if [ $? -eq 0 ]; then
    echo ':: Installing Etcd k/v database ...'
    curl -fsSL https://github.com/coreos/etcd/releases/download/v3.2.6/etcd-v3.2.6-linux-amd64.tar.gz | \
@@ -105,11 +105,8 @@ Vagrant.configure("2") do |config|
 
          node.vm.provider "virtualbox" do |v|
             v.gui = false
-            if host.eql?("d1")
-              v.memory = 1024
-            else
-              v.memory = 3584
-            end
+             v.memory = 3584
+
 
             # Extra customizations
             v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]

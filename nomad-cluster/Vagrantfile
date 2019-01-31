@@ -2,10 +2,14 @@
 # vim:ft=ruby:sw=3:et:
 
 vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
-   's1' => "192.168.56.70",
-   'a1' => "192.168.56.71",
-   'a2' => "192.168.56.72",
-   'a3' => "192.168.56.73"
+   'n1s1' => "192.168.56.70",
+   'n1a1' => "192.168.56.71",
+   'n1a2' => "192.168.56.72",
+   'n1a3' => "192.168.56.73",
+   'n2s1' => "192.168.56.75",
+   'n2a1' => "192.168.56.76",
+   'n2a2' => "192.168.56.77",
+   'n2a3' => "192.168.56.78",
 }
 # EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
 ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
@@ -169,6 +173,7 @@ _eof
   for key in `jq -r ".unseal_keys_b64[] | ." vault-init.json` ; do vault operator unseal $key; done
   vault login `jq -r .root_token vault-init.json`
   consul kv put px-vault-token `vault token create -format=json | jq -r .auth.client_token`
+  vault kv put secret/mysecretkey mysecretkey=SECURESECRET 
 SCRIPT
 #
 =begin
@@ -264,7 +269,7 @@ _eof
   [Install]
   WantedBy=multi-user.target
 _eof
-  echo export NOMAD_ADDR=http://$ip:4646 >> /home/vagrant/.bashrc
+  echo export NOMAD_ADDR=http://$#{vm_nodes.first()[1]}:4646 >> /home/vagrant/.bashrc
   sudo systemctl enable nomad-client.service
   sudo systemctl start nomad-client.service
 SCRIPT
@@ -281,9 +286,9 @@ install_portworx = <<SCRIPT
       -v /opt/pwx:/opt/pwx -v /etc/pwx:/etc/pwx \
       $latest_stable
 
-  /opt/pwx/bin/px-runc install -c NOMAD_PX_CLUSTeR \
+  /opt/pwx/bin/px-runc install -c NOMAD_PX_CLUSTER \
       -k "consul:http://#{vm_nodes.first()[1]}:8500" \
-      -a -d enp0s8 -m enp0s8 -secret_type vault -cluster_secret_key `consul kv get px-vault-token`
+      -a -d enp0s8 -m enp0s8 -secret_type vault -cluster_secret_key mysecretkey -e VAULT_ADDR=http://#{vm_nodes.first()[1]}:8200 -e VAULT_TOKEN=`consul kv get px-vault-token`
 
   systemctl daemon-reload
   systemctl enable portworx
@@ -304,10 +309,10 @@ Vagrant.configure("2") do |config|
 
          node.vm.provider "virtualbox" do |v|
             v.gui = false
-            if host == "s1"
-              v.memory = 1024
+            if host == "n1s1" || host == "n2s1"
+              v.memory = 2048
             else
-              v.memory = 4096
+              v.memory = 6142
             end
             # Extra customizations
             v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
@@ -350,14 +355,23 @@ Vagrant.configure("2") do |config|
 
 _eof
             #{install_prereqs}
+            echo ":: #{vm_nodes["n1s1"]}"
+            echo ":: #{vm_nodes["n2s1"]}"
+            echo ":: #{host == "n1s1"}"
+            echo ":: #{host == "n2s1"}"
             SHELL
-
-          if host == vm_nodes.first()[0] # install Nomad server, Vault and Consul
+          if host == "n1s1" || host == "n2s1" # install Nomad server, Vault and Consul
              node.vm.provision "shell", inline: <<-SHELL
-             #{start_consul_server}
-             #{start_nomad_server}
-             #{start_vault}
+             #{start_consul_server.gsub(vm_nodes["n1s1"], ip)}
+             #{start_nomad_server.gsub(vm_nodes["n1s1"], ip)}
+             #{start_vault.gsub(vm_nodes["n1s1"], ip)}
              SHELL
+          elsif host.start_with?("n2")
+            node.vm.provision "shell", inline: <<-SHELL
+            #{start_consul_client.gsub(vm_nodes["n1s1"], vm_nodes["n2s1"])}
+            #{start_nomad_client.gsub(vm_nodes["n1s1"], vm_nodes["n2s1"])}
+            #{install_portworx.gsub(vm_nodes["n1s1"], vm_nodes["n2s1"])}
+            SHELL
           else
             node.vm.provision "shell", inline: <<-SHELL
             #{start_consul_client}

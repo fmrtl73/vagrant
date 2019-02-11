@@ -5,7 +5,11 @@ vm_nodes = {            # EDIT to specify VM node names, and their private IP (v
    'k1m' => "192.168.56.70",
    'k1n1' => "192.168.56.71",
    'k1n2' => "192.168.56.72",
-   'k1n3' => "192.168.56.73"
+   'k1n3' => "192.168.56.73",
+   # 'k2m' => "192.168.56.74",
+   # 'k2n1' => "192.168.56.75",
+   # 'k2n2' => "192.168.56.76",
+   # 'k2n3' => "192.168.56.77"
 }
 # EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
 ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
@@ -20,103 +24,15 @@ vm_conf = {
 
 # (internal variables)
 mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
+k8s_master_host = "k1m"
+k8s_master_ip = "192.168.56.70"
+k2_master_host = "k2m"
+k2_master_ip = "192.168.56.74"
 mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
-k8s_master_host, k8s_master_ip = vm_nodes.first()
 k8s_cidr, k8s_token, etc_hosts = "192.168.56.0/24", "030ffd.5d7a97b7e0d23ba9", ""
 vm_nodes.each do |host,ip|
    etc_hosts += "\n#{ip}\t#{host}"
 end
-
-#
-# Install scriplets
-#
-# install_prereqs - usually run first, does the base packages install and configuration
-install_prereqs = <<SCRIPT
-echo ':: Installing Prerequisites ...'
-export DEBIAN_FRONTEND=noninteractive
-apt-get clean && apt-get update && \
-apt-get install -y apt-transport-https lsb-release curl linux-image-$(uname -r) ipvsadm
-echo ':: configuring ivps ... '
-printf "ip_vs_wrr\nip_vs_sh\nip_vs_rr\nip_vs\nnf_conntrack_ipv4" >> /etc/modules-load.d/ip_vs.conf
-modprobe -- ip_vs_wrr ip_vs_sh ip_vs_rr ip_vs nf_conntrack_ipv4
-SCRIPT
-
-# install_docker - installs the latest version of Docker
-install_docker = <<SCRIPT
-   echo ':: Installing Docker ...'
-   curl -fsSL https://get.docker.com | sh -s > /dev/null
-   systemctl enable docker
-   systemctl start docker
-SCRIPT
-
-
-# install_kubernetes - installs the Kubernetes cluster (first node [k8s_master_host] will be the master)
-install_kubernetes = <<SCRIPT
-echo ':: Installing Kubernetes ...'
-apt-get update && apt-get install -y apt-transport-https curl
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
-deb https://apt.kubernetes.io/ kubernetes-xenial main
-EOF
-apt-get update
-apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
-
-
-# Tune OS (kubernetes prerequisites)
-sysctl -w net.bridge.bridge-nf-call-iptables=1
-sysctl -w net.bridge.bridge-nf-call-ip6tables=1
-
-# Enable/Start service
-sudo systemctl enable kubelet
-sudo systemctl restart kubelet
-
-# Configure/Start/Join cluster
-hostname -I | grep -wq #{k8s_master_ip}
-if [ $? -eq 0 ]; then
-   echo ':: Configuring Kubernetes Master'
-   kubeadm init --token #{k8s_token} --pod-network-cidr #{k8s_cidr} --apiserver-advertise-address=#{k8s_master_ip}  --ignore-preflight-errors all
-   mkdir -p $HOME/.kube
-   sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-   sudo chown $(id -u):$(id -g) $HOME/.kube/config
-   echo ':: Configuring Kubernetes Network'
-   kubectl apply -n kube-system -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
-   # setup kubectl and alias
-   echo "mkdir -p /home/vagrant/.kube" >> /home/vagrant/.bashrc
-   echo "sudo cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config" >> /home/vagrant/.bashrc
-   echo "sudo chown $(id -u):$(id -g) /home/vagrant/.kube/config" >> /home/vagrant/.bashrc
-   echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
-   echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
-
-else
-   echo ':: Joining Kubernetes Cluster'
-   kubeadm join --token #{k8s_token} #{k8s_master_ip}:6443 --ignore-preflight-errors=all --discovery-token-unsafe-skip-ca-verification
-fi
-SCRIPT
-
-# install_portworx_daemonset - installs Portworx as a Kubernetes DaemoNset
-install_portworx_daemonset = <<SCRIPT
-hostname -I | grep -wq #{k8s_master_ip}
-if [ $? -eq 0 ]; then
-   echo ':: Installing single node ETCD'
-   export IP=#{k8s_master_ip}
-   docker run -d --net=host -p 4001:2399 \
-     --volume=/var/lib/px-etcd:/etcd-data \
-     --name etcd quay.io/coreos/etcd /usr/local/bin/etcd \
-     --data-dir=/etcd-data --name node1 \
-     --advertise-client-urls http://${IP}:4001 \
-     --listen-client-urls http://${IP}:4001 \
-     --initial-advertise-peer-urls http://${IP}:2390 \
-     --listen-peer-urls http://${IP}:2390 \
-     --initial-cluster node1=http://${IP}:2390
-   echo ':: Installing Portworx DaemonSet ...'
-   curl -Lo px-spec.yaml "https://install.portworx.com/2.0/?kbver=1.13.0&&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-cluster-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&lh=true&st=k8s"
-   kubectl apply -f px-spec.yaml
-
-else
-   echo '(skipping install of Portworx on this node)'
-fi
-SCRIPT
 
 #
 # VAGRANT SETUP
@@ -129,13 +45,18 @@ Vagrant.configure("2") do |config|
          node.vm.hostname = "#{host}"
          node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
 	       node.disksize.size = "20GB"
-
+         if host.start_with?("k2")
+           k8s_master_host = k2_master_host
+           k8s_master_ip = k2_master_ip
+         end
          node.vm.provider "virtualbox" do |v|
             v.gui = false
             if host.eql?("k1m")
               v.memory = 2048
+            elsif host.eql?("k2m")
+              v.memory = 2048
             else
-              v.memory = 3072
+              v.memory = 6142
             end
 
             # Extra customizations
@@ -153,7 +74,7 @@ Vagrant.configure("2") do |config|
             v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
             v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
 
-            if defined?(extra_disks)
+            if defined?(extra_disks) and !host.eql?("k1m") and !host.eql?("k2m")
                # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
                # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
                port = myport
@@ -167,10 +88,11 @@ Vagrant.configure("2") do |config|
                end
             end
          end
-
          # Custom post-install script below:
          node.vm.provision "shell", inline: <<-SHELL
             echo ':: Fixing ROOT access ...'
+            echo #{k8s_master_host}
+            echo #{k8s_master_ip}
             echo root:Password1 | chpasswd
             sed -i -e 's/.*UseDNS.*/UseDNS no  # VAGRANT/' \
                -e 's/.*PermitRootLogin.*/PermitRootLogin yes  # VAGRANT/' \
@@ -182,11 +104,77 @@ Vagrant.configure("2") do |config|
             cat << _eof >> /etc/hosts
 #{etc_hosts}
 _eof
-            #{install_prereqs}
-            #{install_docker}
-            #{install_kubernetes}
-            #{install_portworx_daemonset}
+            echo ':: Installing Prerequisites ...'
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get clean && apt-get update && \
+            apt-get install -y apt-transport-https lsb-release curl linux-image-$(uname -r) ipvsadm
+            echo ':: configuring ivps ... '
+            printf "ip_vs_wrr\nip_vs_sh\nip_vs_rr\nip_vs\nnf_conntrack_ipv4" >> /etc/modules-load.d/ip_vs.conf
+            modprobe -- ip_vs_wrr ip_vs_sh ip_vs_rr ip_vs nf_conntrack_ipv4
 
+            echo ':: Installing Docker ...'
+            curl -fsSL https://get.docker.com | sh -s > /dev/null
+            systemctl enable docker
+            systemctl start docker
+            echo ':: Installing Kubernetes ...'
+            echo #{k8s_master_ip}
+            apt-get update && apt-get install -y apt-transport-https curl
+            curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+            cat <<_eof >/etc/apt/sources.list.d/kubernetes.list
+            deb https://apt.kubernetes.io/ kubernetes-xenial main
+_eof
+
+            apt-get update
+            apt-get install -y kubelet kubeadm kubectl
+            apt-mark hold kubelet kubeadm kubectl
+
+
+            # Tune OS (kubernetes prerequisites)
+            sysctl -w net.bridge.bridge-nf-call-iptables=1
+            sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
+            # Enable/Start service
+            sudo systemctl enable kubelet
+            sudo systemctl restart kubelet
+
+            # Configure/Start/Join cluster
+            hostname -I | grep -wq #{k8s_master_ip}
+            if [ $? -eq 0 ]; then
+               echo ':: Configuring Kubernetes Master'
+               kubeadm config images pull &
+               kubeadm init --token #{k8s_token} --pod-network-cidr #{k8s_cidr} --apiserver-advertise-address=#{k8s_master_ip}  --ignore-preflight-errors all
+               mkdir -p $HOME/.kube
+               sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+               sudo chown $(id -u):$(id -g) $HOME/.kube/config
+               mkdir -p /home/vagrant/.kube
+               sudo cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+               sudo chmod 777 /home/vagrant/.kube/config
+               echo ':: Configuring Kubernetes Network'
+               kubectl apply -n kube-system -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+               # setup kubectl and alias
+               echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
+               echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
+               echo ':: Installing single node ETCD'
+               export IP=#{k8s_master_ip}
+               docker run -d --net=host -p 4001:2399 \
+                 --volume=/var/lib/px-etcd:/etcd-data \
+                 --name etcd quay.io/coreos/etcd /usr/local/bin/etcd \
+                 --data-dir=/etcd-data --name node1 \
+                 --advertise-client-urls http://${IP}:4001 \
+                 --listen-client-urls http://${IP}:4001 \
+                 --initial-advertise-peer-urls http://${IP}:2390 \
+                 --listen-peer-urls http://${IP}:2390 \
+                 --initial-cluster node1=http://${IP}:2390
+               echo ':: Installing Portworx DaemonSet ...'
+               curl -Lo px-spec.yaml "https://install.portworx.com/2.0/?kbver=1.13.0&&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-cluster-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&lh=true&st=k8s"
+               kubectl apply -f px-spec.yaml
+
+            else
+               echo ':: Joining Kubernetes Cluster'
+               kubeadm config images pull &
+               (docker pull portworx/oci-monitor:2.0.1 ; docker pull openstorage/stork:2.0.1 ; docker pull portworx/px-enterprise:2.0.1) &
+               kubeadm join --token #{k8s_token} #{k8s_master_ip}:6443 --ignore-preflight-errors=all --discovery-token-unsafe-skip-ca-verification
+            fi
             ln -s /opt/pwx/bin/pxctl /usr/local/bin/
          SHELL
       end

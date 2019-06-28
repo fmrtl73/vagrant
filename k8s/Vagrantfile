@@ -6,10 +6,10 @@ vm_nodes = {            # EDIT to specify VM node names, and their private IP (v
    'k1n1' => "192.168.56.71",
    'k1n2' => "192.168.56.72",
    'k1n3' => "192.168.56.73",
-   # 'k2m' => "192.168.56.74",
-   # 'k2n1' => "192.168.56.75",
-   # 'k2n2' => "192.168.56.76",
-   # 'k2n3' => "192.168.56.77"
+   'k2m' => "192.168.56.74",
+   'k2n1' => "192.168.56.75",
+   'k2n2' => "192.168.56.76",
+   'k2n3' => "192.168.56.77"
 }
 # EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
 ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
@@ -56,7 +56,7 @@ Vagrant.configure("2") do |config|
             elsif host.eql?("k2m")
               v.memory = 2048
             else
-              v.memory = 6142
+              v.memory = 4096
             end
 
             # Extra customizations
@@ -165,15 +165,47 @@ _eof
                  --initial-advertise-peer-urls http://${IP}:2390 \
                  --listen-peer-urls http://${IP}:2390 \
                  --initial-cluster node1=http://${IP}:2390
+               echo ':: Installing Stork'
+               curl http://openstorage-stork.s3-website-us-east-1.amazonaws.com/storkctl/latest/linux/storkctl -o storkctl &&
+               sudo mv storkctl /usr/local/bin &&
+               sudo chmod +x /usr/local/bin/storkctl
                echo ':: Installing Portworx DaemonSet ...'
-               curl -Lo px-spec.yaml "https://install.portworx.com/2.0/?kbver=1.13.0&&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-cluster-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&lh=true&st=k8s"
+               lh=""
+               if [ #{k8s_master_host} == "k1m" ]; then
+                  # lighthouse installs only on k1m
+                  lh="&lh=true"
+                  echo ':: Setting up git account and cloning projects'
+                  sudo cp -f /etc/kubernetes/admin.conf /vagrant/k1.conf
+                  git config --global user.email "fmrtl73@gmail.com"
+                  git config --global user.name "Francois Martel"
+                  git config --global credential.helper cache
+                  git clone http://github.com/fmrtl73/px
+                  git clone http://github.com/fmrtl73/k8s-utils
+                  echo ':: Setting up ingress control for lighthouse'
+                  cd k8s-utils && ./create-ingress.sh && kubectl create -f lighthouse-ingress.yaml && cd ..
+                  chown -R vagrant px
+                  chown -R vagrant k8s-utils
+               fi
+               curl -Lo px-spec.yaml "https://install.portworx.com/2.1/?kbver=1.14.1&&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&st=kvdb$lh"
                kubectl apply -f px-spec.yaml
-
+               if [ #{k8s_master_host} == "k2m" ]; then
+                storkctl generate clusterpair -n default remotecluster-2 | sed '/insert_storage_options_here/c\\    ip: k2n1\\n    token: TOKEN_TOKEN' >/vagrant/cp.yaml
+               fi
             else
                echo ':: Joining Kubernetes Cluster'
                kubeadm config images pull &
                (docker pull portworx/oci-monitor:2.0.1 ; docker pull openstorage/stork:2.0.1 ; docker pull portworx/px-enterprise:2.0.1) &
                kubeadm join --token #{k8s_token} #{k8s_master_ip}:6443 --ignore-preflight-errors=all --discovery-token-unsafe-skip-ca-verification
+               if [ `hostname` == "k2n3" ]; then
+                 while : ; do
+                   token=$(pxctl cluster token show | cut -f 3 -d " ")
+                   echo $token | grep -Eq '.{128}'
+                   [ $? -eq 0 ] && break
+                   sleep 5
+                 done
+                sed -i "s/TOKEN_TOKEN/$token/g" /vagrant/cp.yaml
+                kubectl --kubeconfig /vagrant/k1.conf create -f /vagrant/cp.yaml
+               fi
             fi
             ln -s /opt/pwx/bin/pxctl /usr/local/bin/
          SHELL

@@ -188,7 +188,8 @@ _eof
                   chown -R vagrant px
                   chown -R vagrant k8s-utils
                fi
-               curl -Lo px-spec.yaml "https://install.portworx.com/2.1/?kbver=1.14.1&&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&st=k8s$lh"
+               kbver=`kubectl version --short | awk -Fv '/Server Version: / {print $3}'`
+               curl -Lo px-spec.yaml "https://install.portworx.com/2.1/?kbver=$kbver&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&st=k8s$lh"
                kubectl apply -f px-spec.yaml
                if [ #{k8s_master_host} == "k2m" ]; then
                 storkctl generate clusterpair -n default remotecluster-2 | sed '/insert_storage_options_here/c\\    ip: k2n1\\n    token: TOKEN_TOKEN' >/vagrant/cp.yaml

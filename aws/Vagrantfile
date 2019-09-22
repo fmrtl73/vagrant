@@ -4,7 +4,7 @@ nodes = 3
 disk_size = 20
 keypair_name = "vagrant"
 keypair_path = "/Users/francoismartel/dev/px-aws-k8s-multi/vagrant.pem"
-type = "m5d.12xlarge"
+type = "m5d.4xlarge"
 name = "px-test-cluster"
 version = "2.1.5"
 
@@ -65,7 +65,7 @@ Vagrant.configure("2") do |config|
       master.vm.provider :aws do |aws|
         aws.private_ip_address = "192.168.99.1#{c}0"
         aws.tags = { "Name" => "#{hostname_master}" }
-        aws.block_device_mapping = [{ "DeviceName" => "/dev/sda1", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => 15 }]
+        aws.block_device_mapping = [{ "DeviceName" => "/dev/sda1", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => 50 }]
       end
       master.vm.provision "shell", inline: <<-SHELL
         ( hostnamectl set-hostname #{hostname_master}
@@ -76,7 +76,7 @@ Vagrant.configure("2") do |config|
             curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add
             echo deb http://apt.kubernetes.io/ kubernetes-xenial main >/etc/apt/sources.list.d/kubernetes.list
             apt update -y
-            apt install -y docker.io kubeadm=1.15.3-00 kubelet=1.15.3-00
+            apt install -y docker.io kubeadm=1.15.3-00 kubelet=1.15.3-00  kubectl=1.15.3-00
           fi
           export IP=192.168.99.1#{c}0
           systemctl enable docker kubelet
@@ -92,7 +92,7 @@ Vagrant.configure("2") do |config|
             --initial-advertise-peer-urls http://${IP}:2390 \
             --listen-peer-urls http://${IP}:2390 \
             --initial-cluster node1=http://${IP}:2390
-          curl -so /tmp/px.yml "https://install.portworx.com/#{version}?kbver=$(kubectl version --short | awk -Fv '/Server Version: / {print \$3}')&k=etcd:http://192.168.99.1#{c}0:4001&m=ens5&d=ens5&c=#{name}-#{c}&stork=true&st=k8s&lh=true"
+          curl -so /tmp/px.yml "https://install.portworx.com/#{version}?kbver=$(kubectl version --short | awk -Fv '/Server Version: / {print \$3}')&k=etcd:http://192.168.99.1#{c}0:4001&m=ens5&d=ens5&c=#{name}-#{c}&stork=true&st=k8s&lh=true&j=auto"
           kubeadm config images list | xargs -n1 -P0 docker pull
           kubeadm init --apiserver-advertise-address=192.168.99.1#{c}0 --pod-network-cidr=10.244.0.0/16
           mkdir /root/.kube /home/vagrant/.kube
@@ -113,6 +113,15 @@ Vagrant.configure("2") do |config|
             storkctl generate clusterpair -n default remotecluster-#{c} | sed '/insert_storage_options_here/c\\    ip: node-#{c}-1\\n    token: '$token >/root/cp.yaml
             cat /root/cp.yaml | ssh -oConnectTimeout=1 -oStrictHostKeyChecking=no master-1 kubectl apply -f -
           fi
+          echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
+          echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
+          echo "source <(kubectl completion bash)" >> /home/vagrant/.bashrc
+          echo "source <(complete -F __start_kubectl kc)" >> /home/vagrant/.bashrc
+          echo "source <(complete -F __start_kubectl ks)" >> /home/vagrant/.bashrc
+          git clone http://github.com/fmrtl73/px
+          kubectl create -f px/amq/k8s/jboss-amq/sc.yaml
+          kubectl apply -f px/amq/k8s/jboss-amq/configmap.yaml
+          kubectl apply -f px/amq/k8s/jboss-amq/amq.yaml
           echo End
         ) &>/var/log/vagrant.bootstrap &
       SHELL
@@ -123,7 +132,7 @@ Vagrant.configure("2") do |config|
         node.vm.provider :aws do |aws|
           aws.private_ip_address = "192.168.99.1#{c}#{n}"
           aws.tags = { "Name" => "node-#{c}-#{n}" }
-          aws.block_device_mapping = [{ "DeviceName" => "/dev/sda1", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => 15 }, { "DeviceName" => "/dev/sdb", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => disk_size }]
+#          aws.block_device_mapping = [{ "DeviceName" => "/dev/sda1", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => 15 }, { "DeviceName" => "/dev/sdb", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => disk_size }]
         end
         node.vm.provision "shell", inline: <<-SHELL
           ( hostnamectl set-hostname node-#{c}-#{n}

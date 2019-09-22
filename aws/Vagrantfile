@@ -1,0 +1,157 @@
+# Edit these parameters
+clusters = 1
+nodes = 3
+disk_size = 20
+keypair_name = "vagrant"
+keypair_path = "/Users/francoismartel/dev/px-aws-k8s-multi/vagrant.pem"
+type = "m5d.12xlarge"
+name = "px-test-cluster"
+version = "2.1.5"
+
+# Do not edit below this line
+subnet_id = "#{ENV['subnet']}"
+security_group_id = "#{ENV['sg']}"
+ami = "#{ENV['ami']}"
+region = "#{ENV['AWS_DEFAULT_REGION']}"
+distro = "#{ENV['distro']}"
+
+if !File.exist?("id_rsa") or !File.exist?("id_rsa.pub")
+    abort("Please create SSH keys before running vagrant up.")
+end
+
+open("hosts", "w") do |f|
+  (1..clusters).each do |c|
+    f << "192.168.99.1#{c}0 master-#{c}\n"
+    (1..nodes).each do |n|
+      f << "192.168.99.1#{c}#{n} node-#{c}-#{n}\n"
+    end
+  end
+end
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "https://github.com/mitchellh/vagrant-aws/raw/master/dummy.box"
+  config.vm.synced_folder ".", "/vagrant", type: "rsync"
+  config.vm.provider :aws do |aws, override|
+    aws.security_groups = ["#{security_group_id}"]
+    aws.keypair_name = "#{keypair_name}"
+    aws.region = "#{region}"
+    availability_zone ="#{region}-c"
+    aws.instance_type = "#{type}"
+    aws.ami = "#{ami}"
+    aws.subnet_id = "#{subnet_id}"
+    aws.associate_public_ip = true
+    aws.user_data = File.read("user_data.sh")
+    override.ssh.private_key_path = "#{keypair_path}"
+  end
+  config.vm.provision "shell", inline: <<-SHELL
+    if [ -f /etc/selinux/config ]; then
+      setenforce 0
+      sed -i s/SELINUX=enforcing/SELINUX=disabled/g /etc/selinux/config
+    fi
+    swapoff -a
+    sed -i /swap/d /etc/fstab
+    cp /vagrant/hosts /etc
+    cp /vagrant/id_rsa /root/.ssh
+    cp /vagrant/id_rsa.pub /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/id_rsa
+    modprobe br_netfilter
+    sysctl -w net.bridge.bridge-nf-call-iptables=1 >/etc/sysctl.conf
+  SHELL
+
+  (1..clusters).each do |c|
+    hostname_master = "master-#{c}"
+    config.vm.define "#{hostname_master}" do |master|
+      master.vm.hostname = "#{hostname_master}"
+      master.vm.provider :aws do |aws|
+        aws.private_ip_address = "192.168.99.1#{c}0"
+        aws.tags = { "Name" => "#{hostname_master}" }
+        aws.block_device_mapping = [{ "DeviceName" => "/dev/sda1", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => 15 }]
+      end
+      master.vm.provision "shell", inline: <<-SHELL
+        ( hostnamectl set-hostname #{hostname_master}
+          if [ #{distro} == centos ]; then
+            cp /vagrant/*.repo /etc/yum.repos.d
+            yum install -y kubeadm=1.15.3-00 kubelet=1.15.3-00 docker
+          elif [ #{distro} == ubuntu ]; then
+            curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add
+            echo deb http://apt.kubernetes.io/ kubernetes-xenial main >/etc/apt/sources.list.d/kubernetes.list
+            apt update -y
+            apt install -y docker.io kubeadm=1.15.3-00 kubelet=1.15.3-00
+          fi
+          export IP=192.168.99.1#{c}0
+          systemctl enable docker kubelet
+          systemctl restart docker kubelet
+          sleep 2
+          export IP="192.168.99.1#{c}0"
+          docker run -d --net=host -p 4001:2399 \
+            --volume=/var/lib/px-etcd:/etcd-data \
+            --name etcd quay.io/coreos/etcd /usr/local/bin/etcd \
+            --data-dir=/etcd-data --name node1 \
+            --advertise-client-urls http://${IP}:4001 \
+            --listen-client-urls http://${IP}:4001 \
+            --initial-advertise-peer-urls http://${IP}:2390 \
+            --listen-peer-urls http://${IP}:2390 \
+            --initial-cluster node1=http://${IP}:2390
+          curl -so /tmp/px.yml "https://install.portworx.com/#{version}?kbver=$(kubectl version --short | awk -Fv '/Server Version: / {print \$3}')&k=etcd:http://192.168.99.1#{c}0:4001&m=ens5&d=ens5&c=#{name}-#{c}&stork=true&st=k8s&lh=true"
+          kubeadm config images list | xargs -n1 -P0 docker pull
+          kubeadm init --apiserver-advertise-address=192.168.99.1#{c}0 --pod-network-cidr=10.244.0.0/16
+          mkdir /root/.kube /home/vagrant/.kube
+          cp /etc/kubernetes/admin.conf /root/.kube/config
+          cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+          chown -R vagrant.vagrant /home/vagrant/.kube
+          kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+          kubectl apply -f /tmp/px.yml
+          curl -s http://openstorage-stork.s3-website-us-east-1.amazonaws.com/storkctl/2.0.0/linux/storkctl -o /usr/bin/storkctl
+          chmod +x /usr/bin/storkctl
+          if [ $(hostname) != master-1 ]; then
+            while : ; do
+              token=$(ssh -oConnectTimeout=1 -oStrictHostKeyChecking=no node-#{c}-1 pxctl cluster token show | cut -f 3 -d " ")
+              echo $token | grep -Eq '.{128}'
+              [ $? -eq 0 ] && break
+              sleep 5
+            done
+            storkctl generate clusterpair -n default remotecluster-#{c} | sed '/insert_storage_options_here/c\\    ip: node-#{c}-1\\n    token: '$token >/root/cp.yaml
+            cat /root/cp.yaml | ssh -oConnectTimeout=1 -oStrictHostKeyChecking=no master-1 kubectl apply -f -
+          fi
+          echo End
+        ) &>/var/log/vagrant.bootstrap &
+      SHELL
+    end
+    (1..nodes).each do |n|
+      config.vm.define "node-#{c}-#{n}" do |node|
+        node.vm.hostname = "node-#{c}-#{n}"
+        node.vm.provider :aws do |aws|
+          aws.private_ip_address = "192.168.99.1#{c}#{n}"
+          aws.tags = { "Name" => "node-#{c}-#{n}" }
+          aws.block_device_mapping = [{ "DeviceName" => "/dev/sda1", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => 15 }, { "DeviceName" => "/dev/sdb", "Ebs.DeleteOnTermination" => true, "Ebs.VolumeSize" => disk_size }]
+        end
+        node.vm.provision "shell", inline: <<-SHELL
+          ( hostnamectl set-hostname node-#{c}-#{n}
+            if [ #{distro} == centos ]; then
+              cp /vagrant/*.repo /etc/yum.repos.d
+              yum install -y kubeadm=1.15.3-00 kubelet=1.15.3-00 docker
+            elif [ #{distro} == ubuntu ]; then
+              curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add
+              echo deb http://apt.kubernetes.io/ kubernetes-xenial main >/etc/apt/sources.list.d/kubernetes.list
+              apt update -y
+              apt install -y docker.io kubeadm=1.15.3-00 kubelet=1.15.3-00
+            fi
+            systemctl enable docker kubelet
+            systemctl restart docker kubelet
+            kubeadm config images list | xargs -n1 -P0 docker pull &
+            curl -s "https://install.portworx.com/#{version}?kbver=$(kubectl version --short | awk -Fv '/Server Version: / {print \$3}')&b=true&m=ens5&d=ens5&c=#{name}-#{c}&stork=true&st=k8s&lh=false" | awk '/image: /{print $2} /oci-monitor/{sub(/oci-monitor/,"px-enterprise",$2);print$2}' | sort -u | xargs -n1 -P0 docker pull &
+            while : ; do
+              command=$(ssh -oConnectTimeout=1 -oStrictHostKeyChecking=no #{hostname_master} kubeadm token create --print-join-command)
+              [ $? -eq 0 ] && break
+              sleep 5
+            done
+            wait
+            eval $command
+            echo End
+          ) &>/var/log/vagrant.bootstrap &
+        SHELL
+      end
+    end
+  end
+
+end

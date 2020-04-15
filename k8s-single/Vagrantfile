@@ -1,0 +1,213 @@
+1.11# -*- mode: ruby -*-
+# vim:ft=ruby:sw=3:et:
+
+vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
+   'k1m' => "192.168.56.70",
+   'k1n1' => "192.168.56.71",
+  'k1n2' => "192.168.56.72",
+  'k1n3' => "192.168.56.73"
+}
+
+worker_memory=2048*6
+master_memory=2048
+# EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
+ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
+#ostype = ENV['KUBE_OSTYPE'] || 'centos7'
+
+# VM config, format: <type-label> => [ 0:vagrant-box, 1:vm-net-iface, 2:vm-disk-controller, 3:vm-start-port, 4:vm-drives-map ]
+# see https://atlas.hashicorp.com/search? for more VM images (ie. "box-names")
+vm_conf = {
+   'ubuntu16' => [ 'ubuntu/xenial64', 'enp0s8', 'SCSI', 2, { "sdc" => 50*1024, "sdd" => 64*1024 } ],
+   'centos7'  => [ 'centos/7', 'eth1', 'IDE', 1, { "sdb" => 20*1024 } ]
+}
+
+# (internal variables)
+mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
+k8s_master_host = "k1m"
+k8s_master_ip = "192.168.56.70"
+k2_master_host = "k2m"
+k2_master_ip = "192.168.56.74"
+mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
+k8s_cidr, k8s_token, etc_hosts = "192.168.56.0/24", "030ffd.5d7a97b7e0d23ba9", ""
+vm_nodes.each do |host,ip|
+   etc_hosts += "\n#{ip}\t#{host}"
+end
+
+#
+# VAGRANT SETUP
+#
+Vagrant.configure("2") do |config|
+
+   vm_nodes.each do |host,ip|
+      config.vm.define "#{host}" do |node|
+         node.vm.box = "#{mybox}"
+         node.vm.hostname = "#{host}"
+         node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
+	       node.disksize.size = "20GB"
+         if host.start_with?("k2")
+           k8s_master_host = k2_master_host
+           k8s_master_ip = k2_master_ip
+         end
+         node.vm.provider "virtualbox" do |v|
+            v.gui = false
+            if host.eql?("k1m")
+              v.memory = master_memory
+            elsif host.eql?("k2m")
+              v.memory = master_memory
+            else
+              v.memory = worker_memory
+            end
+
+            # Extra customizations
+            v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--chipset", "ich9"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--audio", "none"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--usb", "off"]
+            v.customize 'pre-boot', ["modifyvm", :id, "--accelerate3d", "off"]
+            v.customize 'pre-boot', ["storagectl", :id, "--name", "#{mycntrl}", "--hostiocache", "on"]
+
+            # force Virtualbox to sync the time difference w/ threshold 10s (defl was 20 minutes)
+            v.customize [ "guestproperty", "set", :id, "/VirtualBox/GuestAdd/VBoxService/--timesync-set-threshold", 10000 ]
+
+            # Net boot speedup (see https://github.com/mitchellh/vagrant/issues/1807)
+            v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+            v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
+            if defined?(extra_disks) and !host.eql?("k1m") and !host.eql?("k2m")
+               # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
+               # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
+               port = myport
+               extra_disks.each do |hdd, size|
+                  vdisk_name = ".vagrant/#{host}_#{hdd}.vdi"
+                  unless File.exist?(vdisk_name)
+                     v.customize ['createhd', '--filename', vdisk_name, '--size', "#{size}"]
+                  end
+                  v.customize ['storageattach', :id, '--storagectl', "#{mycntrl}", '--port', port, '--device', 0, '--type', 'hdd', '--medium', vdisk_name]
+                  port = port + 1
+               end
+            end
+         end
+         # Custom post-install script below:
+         node.vm.provision "shell", inline: <<-SHELL
+            echo ':: Fixing ROOT access ...'
+            echo #{k8s_master_host}
+            echo #{k8s_master_ip}
+            echo root:Password1 | chpasswd
+            sed -i -e 's/.*UseDNS.*/UseDNS no  # VAGRANT/' \
+               -e 's/.*PermitRootLogin.*/PermitRootLogin yes  # VAGRANT/' \
+               -e 's/.*PasswordAuthentication.*/PasswordAuthentication yes  # VAGRANT/' \
+               /etc/ssh/sshd_config && systemctl restart sshd
+
+            echo ':: Fixing /etc/hosts ...'
+            sed -i -e 's/.*#{host}.*/# \\0  # VAGRANT/' /etc/hosts
+            cat << _eof >> /etc/hosts
+#{etc_hosts}
+_eof
+            echo ':: Installing Prerequisites ...'
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get clean && apt-get update && \
+            apt-get install -y apt-transport-https lsb-release curl linux-image-$(uname -r) ipvsadm
+            echo ':: configuring ivps ... '
+            printf "ip_vs_wrr\nip_vs_sh\nip_vs_rr\nip_vs\nnf_conntrack_ipv4" >> /etc/modules-load.d/ip_vs.conf
+            modprobe -- ip_vs_wrr ip_vs_sh ip_vs_rr ip_vs nf_conntrack_ipv4
+
+            echo ':: Installing Docker ...'
+            mkdir -p /etc/docker/certs.d/172.28.128.3.xip.io
+            cp /vagrant/harbor-certs/* /etc/docker/certs.d/172.28.128.3.xip.io
+            curl -fsSL https://get.docker.com | sh -s > /dev/null
+            systemctl enable docker
+            systemctl start docker
+
+            echo ':: Installing Kubernetes ...'
+            echo #{k8s_master_ip}
+            apt-get update && apt-get install -y apt-transport-https curl
+            curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+            cat <<_eof >/etc/apt/sources.list.d/kubernetes.list
+            deb https://apt.kubernetes.io/ kubernetes-xenial main
+_eof
+
+            apt-get update
+            apt-get install -y kubelet=1.16.2-00 kubeadm=1.16.2-00 kubectl=1.16.2-00
+            #{}apt-mark hold kubelet=1.15.3-00 kubeadm=1.15.3-00 kubectl=1.15.3-00
+
+
+            # Tune OS (kubernetes prerequisites)
+            sysctl -w net.bridge.bridge-nf-call-iptables=1
+            sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
+            # Enable/Start service
+            sudo systemctl enable kubelet
+            sudo systemctl restart kubelet
+
+            # Configure/Start/Join cluster
+            hostname -I | grep -wq #{k8s_master_ip}
+            if [ $? -eq 0 ]; then
+               echo ':: Configuring Kubernetes Master'
+               kubeadm config images pull &
+               kubeadm init --token #{k8s_token} --pod-network-cidr #{k8s_cidr} --apiserver-advertise-address=#{k8s_master_ip}  --ignore-preflight-errors all
+               mkdir -p $HOME/.kube
+               sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+               sudo chown $(id -u):$(id -g) $HOME/.kube/config
+               mkdir -p /home/vagrant/.kube
+               sudo cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+               sudo chmod 777 /home/vagrant/.kube/config
+               sudo cp /etc/kubernetes/admin.conf /vagrant/config
+               sudo apt-get install bash-completion
+               echo "source <(kubectl completion bash | sed 's/kubectl/kc/g')" >>~/.bashrc
+               echo ':: Configuring Kubernetes Network'
+               kubectl apply -n kube-system -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+               # setup kubectl and alias
+               echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
+               echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
+               echo "alias kp='kubectl -n portworx'" >> /home/vagrant/.bashrc
+               echo "source <(kubectl completion bash)" >> /home/vagrant/.bashrc
+               echo "source <(complete -F __start_kubectl kc)" >> /home/vagrant/.bashrc
+               echo "source <(complete -F __start_kubectl ks)" >> /home/vagrant/.bashrc
+               echo ":: Installing Docker Registry"
+               docker run -d -p 5000:5000 --restart=always --name registry registry:2
+               echo ':: Installing single node ETCD'
+               export IP=#{k8s_master_ip}
+               docker run -d --net=host -p 4001:2399 \
+                 --volume=/var/lib/px-etcd:/etcd-data \
+                 --name etcd quay.io/coreos/etcd /usr/local/bin/etcd \
+                 --data-dir=/etcd-data --name node1 \
+                 --advertise-client-urls http://${IP}:4001 \
+                 --listen-client-urls http://${IP}:4001 \
+                 --initial-advertise-peer-urls http://${IP}:2390 \
+                 --listen-peer-urls http://${IP}:2390 \
+                 --initial-cluster node1=http://${IP}:2390
+               echo ':: Installing Stork'
+               curl http://openstorage-stork.s3-website-us-east-1.amazonaws.com/storkctl/latest/linux/storkctl -o storkctl &&
+               sudo mv storkctl /usr/local/bin &&
+               sudo chmod +x /usr/local/bin/storkctl
+               echo ':: Installing Portworx DaemonSet ...'
+               lh=""
+               if [ #{k8s_master_host} == "k1m" ]; then
+                  # lighthouse installs only on k1m
+                  lh="&lh=true"
+                  echo ':: Setting up git account and cloning projects'
+                  sudo cp -f /etc/kubernetes/admin.conf /vagrant/k1.conf
+                  git config --global user.email "fmrtl73@gmail.com"
+                  git config --global user.name "Francois Martel"
+                  git config --global credential.helper cache
+                  git clone http://github.com/fmrtl73/px
+                  git clone http://github.com/fmrtl73/k8s-utils
+                  echo ':: Setting up ingress control for lighthouse'
+                  cd k8s-utils && ./create-ingress.sh && kubectl create -f lighthouse-ingress.yaml && cd ..
+                  chown -R vagrant px
+                  chown -R vagrant k8s-utils
+               fi
+               kubectl create ns portworx
+               kubectl apply -f /vagrant/px-operator.yaml
+               kubectl wait --for=condition=Available deploy/portworx-operator -n portworx
+               kubectl apply -f /vagrant/px-cluster.yaml
+            else
+               echo ':: Joining Kubernetes Cluster'
+               kubeadm config images pull &
+               kubeadm join --token #{k8s_token} #{k8s_master_ip}:6443 --ignore-preflight-errors=all --discovery-token-unsafe-skip-ca-verification
+            fi
+            ln -s /opt/pwx/bin/pxctl /usr/local/bin/
+         SHELL
+      end
+   end
+end

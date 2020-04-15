@@ -1,0 +1,36 @@
+kind: StorageCluster
+apiVersion: core.libopenstorage.org/v1alpha1
+metadata:
+  name: px-cluster
+  namespace: portworx
+  annotations:
+    portworx.io/is-openshift: "true"
+spec:
+  deleteStrategy:
+    type: UninstallAndWipe
+  image: portworx/oci-monitor:2.5.0
+  imagePullPolicy: Always
+  customImageRegistry: 172.28.128.3.xip.io/px
+  kvdb:
+    endpoints:
+    - etcd:http://192.168.56.70:4001
+  network:
+    dataInterface: enp0s8
+    mgmtInterface: enp0s8
+  storage:
+    useAll: true
+  secretsProvider: k8s
+  stork:
+    enabled: true
+    image: openstorage/stork:2.3.3
+  userInterface:
+    enabled: true
+    image: portworx/px-lighthouse:2.0.7
+  autopilot:
+    enabled: true
+    image: portworx/autopilot:1.2.0
+    providers:
+    - name: default
+      type: prometheus
+      params:
+        url: http://prometheus:9090

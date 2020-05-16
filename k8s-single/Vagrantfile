@@ -2,13 +2,13 @@
 # vim:ft=ruby:sw=3:et:
 
 vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
-   'k1m' => "192.168.56.70",
-   'k1n1' => "192.168.56.71",
-  'k1n2' => "192.168.56.72",
-  'k1n3' => "192.168.56.73"
+   'k1m' => "192.168.1.70",
+   'k1n1' => "192.168.1.71",
+  'k1n2' => "192.168.1.72",
+  'k1n3' => "192.168.1.73"
 }
 
-worker_memory=2048*6
+worker_memory=1024*5
 master_memory=2048
 # EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
 ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
@@ -24,11 +24,11 @@ vm_conf = {
 # (internal variables)
 mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
 k8s_master_host = "k1m"
-k8s_master_ip = "192.168.56.70"
+k8s_master_ip = "192.168.1.70"
 k2_master_host = "k2m"
-k2_master_ip = "192.168.56.74"
+k2_master_ip = "192.168.1.74"
 mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
-k8s_cidr, k8s_token, etc_hosts = "192.168.56.0/24", "030ffd.5d7a97b7e0d23ba9", ""
+k8s_cidr, k8s_token, etc_hosts = "192.168.1.0/24", "030ffd.5d7a97b7e0d23ba9", ""
 vm_nodes.each do |host,ip|
    etc_hosts += "\n#{ip}\t#{host}"
 end
@@ -42,8 +42,8 @@ Vagrant.configure("2") do |config|
       config.vm.define "#{host}" do |node|
          node.vm.box = "#{mybox}"
          node.vm.hostname = "#{host}"
-         node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
-	       node.disksize.size = "20GB"
+         node.vm.network "public_network", ip: "#{ip}", :netmask => '255.255.255.0', bridge: "en1: Wi-Fi (Wireless)"
+	      node.disksize.size = "50GB"
          if host.start_with?("k2")
            k8s_master_host = k2_master_host
            k8s_master_ip = k2_master_ip
@@ -125,13 +125,10 @@ _eof
             cat <<_eof >/etc/apt/sources.list.d/kubernetes.list
             deb https://apt.kubernetes.io/ kubernetes-xenial main
 _eof
-
             apt-get update
             apt-get install -y kubelet=1.16.2-00 kubeadm=1.16.2-00 kubectl=1.16.2-00
-            #{}apt-mark hold kubelet=1.15.3-00 kubeadm=1.15.3-00 kubectl=1.15.3-00
-
-
             # Tune OS (kubernetes prerequisites)
+
             sysctl -w net.bridge.bridge-nf-call-iptables=1
             sysctl -w net.bridge.bridge-nf-call-ip6tables=1
 
@@ -150,12 +147,14 @@ _eof
                sudo chown $(id -u):$(id -g) $HOME/.kube/config
                mkdir -p /home/vagrant/.kube
                sudo cp /etc/kubernetes/admin.conf /home/vagrant/.kube/config
-               sudo chmod 777 /home/vagrant/.kube/config
+               sudo chmod -R 777 /home/vagrant/.kube
                sudo cp /etc/kubernetes/admin.conf /vagrant/config
                sudo apt-get install bash-completion
                echo "source <(kubectl completion bash | sed 's/kubectl/kc/g')" >>~/.bashrc
                echo ':: Configuring Kubernetes Network'
                kubectl apply -n kube-system -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+               # On first install only
+               kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$(openssl rand -base64 128)"
                # setup kubectl and alias
                echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
                echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
@@ -163,44 +162,22 @@ _eof
                echo "source <(kubectl completion bash)" >> /home/vagrant/.bashrc
                echo "source <(complete -F __start_kubectl kc)" >> /home/vagrant/.bashrc
                echo "source <(complete -F __start_kubectl ks)" >> /home/vagrant/.bashrc
-               echo ":: Installing Docker Registry"
-               docker run -d -p 5000:5000 --restart=always --name registry registry:2
-               echo ':: Installing single node ETCD'
-               export IP=#{k8s_master_ip}
-               docker run -d --net=host -p 4001:2399 \
-                 --volume=/var/lib/px-etcd:/etcd-data \
-                 --name etcd quay.io/coreos/etcd /usr/local/bin/etcd \
-                 --data-dir=/etcd-data --name node1 \
-                 --advertise-client-urls http://${IP}:4001 \
-                 --listen-client-urls http://${IP}:4001 \
-                 --initial-advertise-peer-urls http://${IP}:2390 \
-                 --listen-peer-urls http://${IP}:2390 \
-                 --initial-cluster node1=http://${IP}:2390
+               # px-central staging
+               sudo apt install -y jq
+               sudo apt install -y python
+               /vagrant/install.sh --oidc --admin-user admin --admin-password Password2 --admin-email  fm@portworx.com
                echo ':: Installing Stork'
                curl http://openstorage-stork.s3-website-us-east-1.amazonaws.com/storkctl/latest/linux/storkctl -o storkctl &&
                sudo mv storkctl /usr/local/bin &&
                sudo chmod +x /usr/local/bin/storkctl
-               echo ':: Installing Portworx DaemonSet ...'
-               lh=""
-               if [ #{k8s_master_host} == "k1m" ]; then
-                  # lighthouse installs only on k1m
-                  lh="&lh=true"
-                  echo ':: Setting up git account and cloning projects'
-                  sudo cp -f /etc/kubernetes/admin.conf /vagrant/k1.conf
-                  git config --global user.email "fmrtl73@gmail.com"
-                  git config --global user.name "Francois Martel"
-                  git config --global credential.helper cache
-                  git clone http://github.com/fmrtl73/px
-                  git clone http://github.com/fmrtl73/k8s-utils
-                  echo ':: Setting up ingress control for lighthouse'
-                  cd k8s-utils && ./create-ingress.sh && kubectl create -f lighthouse-ingress.yaml && cd ..
-                  chown -R vagrant px
-                  chown -R vagrant k8s-utils
-               fi
                kubectl create ns portworx
-               kubectl apply -f /vagrant/px-operator.yaml
-               kubectl wait --for=condition=Available deploy/portworx-operator -n portworx
-               kubectl apply -f /vagrant/px-cluster.yaml
+               # install kubens and kubectx
+               sudo git clone https://github.com/ahmetb/kubectx /opt/kubectx
+               sudo ln -s /opt/kubectx/kubectx /usr/local/bin/kubectx
+               sudo ln -s /opt/kubectx/kubens /usr/local/bin/kubens
+               git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+               ~/.fzf/install --all
+
             else
                echo ':: Joining Kubernetes Cluster'
                kubeadm config images pull &

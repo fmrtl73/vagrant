@@ -2,15 +2,18 @@
 # vim:ft=ruby:sw=3:et:
 
 vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
-   'k1m' => "192.168.56.70",
-   'k1n1' => "192.168.56.71",
-   'k1n2' => "192.168.56.72",
-   'k1n3' => "192.168.56.73"
-   # 'k2m' => "192.168.56.74",
-   # 'k2n1' => "192.168.56.75",
-   # 'k2n2' => "192.168.56.76",
-   # 'k2n3' => "192.168.56.77"
+  #  'k1m' => "192.168.1.70",
+  #  'k1n1' => "192.168.1.71",
+  # 'k1n2' => "192.168.1.72",
+  # 'k1n3' => "192.168.1.73",
+  'k2m' => "192.168.1.74",
+  'k2n1' => "192.168.1.75",
+ 'k2n2' => "192.168.1.76",
+ 'k2n3' => "192.168.1.77"
 }
+
+worker_memory=2048*2
+master_memory=2048
 # EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
 ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
 #ostype = ENV['KUBE_OSTYPE'] || 'centos7'
@@ -25,11 +28,11 @@ vm_conf = {
 # (internal variables)
 mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
 k8s_master_host = "k1m"
-k8s_master_ip = "192.168.56.70"
+k8s_master_ip = "192.168.1.70"
 k2_master_host = "k2m"
-k2_master_ip = "192.168.56.74"
+k2_master_ip = "192.168.1.74"
 mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
-k8s_cidr, k8s_token, etc_hosts = "192.168.56.0/24", "030ffd.5d7a97b7e0d23ba9", ""
+k8s_cidr, k8s_token, etc_hosts = "192.168.1.0/24", "030ffd.5d7a97b7e0d23ba9", ""
 vm_nodes.each do |host,ip|
    etc_hosts += "\n#{ip}\t#{host}"
 end
@@ -43,7 +46,7 @@ Vagrant.configure("2") do |config|
       config.vm.define "#{host}" do |node|
          node.vm.box = "#{mybox}"
          node.vm.hostname = "#{host}"
-         node.vm.network "private_network", ip: "#{ip}", :netmask => "255.255.255.0"
+         node.vm.network "public_network", ip: "#{ip}", :netmask => '255.255.255.0', bridge: "en1: Wi-Fi (Wireless)"
 	       node.disksize.size = "20GB"
          if host.start_with?("k2")
            k8s_master_host = k2_master_host
@@ -52,11 +55,11 @@ Vagrant.configure("2") do |config|
          node.vm.provider "virtualbox" do |v|
             v.gui = false
             if host.eql?("k1m")
-              v.memory = 2048
+              v.memory = master_memory
             elsif host.eql?("k2m")
-              v.memory = 2048
+              v.memory = master_memory
             else
-              v.memory = 8192
+              v.memory = worker_memory
             end
 
             # Extra customizations
@@ -113,9 +116,12 @@ _eof
             modprobe -- ip_vs_wrr ip_vs_sh ip_vs_rr ip_vs nf_conntrack_ipv4
 
             echo ':: Installing Docker ...'
+            mkdir -p /etc/docker/certs.d/172.28.128.3.xip.io
+            cp /vagrant/harbor-certs/* /etc/docker/certs.d/172.28.128.3.xip.io
             curl -fsSL https://get.docker.com | sh -s > /dev/null
             systemctl enable docker
             systemctl start docker
+
             echo ':: Installing Kubernetes ...'
             echo #{k8s_master_ip}
             apt-get update && apt-get install -y apt-transport-https curl
@@ -125,8 +131,8 @@ _eof
 _eof
 
             apt-get update
-            apt-get install -y kubelet kubeadm kubectl
-            apt-mark hold kubelet kubeadm kubectl
+            apt-get install -y kubelet=1.16.2-00 kubeadm=1.16.2-00 kubectl=1.16.2-00
+            #{}apt-mark hold kubelet=1.15.3-00 kubeadm=1.15.3-00 kubectl=1.15.3-00
 
 
             # Tune OS (kubernetes prerequisites)
@@ -145,10 +151,11 @@ _eof
                kubeadm init --token #{k8s_token} --pod-network-cidr #{k8s_cidr} --apiserver-advertise-address=#{k8s_master_ip}  --ignore-preflight-errors all
                mkdir -p $HOME/.kube
                sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+               sudo cp /etc/kubernetes/admin.conf /vagrant/config
                sudo chown $(id -u):$(id -g) $HOME/.kube/config
                mkdir -p /home/vagrant/.kube
                sudo cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
-               sudo chmod 777 /home/vagrant/.kube/config
+               sudo chmod -R 777 /home/vagrant/.kube
                sudo apt-get install bash-completion
                echo "source <(kubectl completion bash | sed 's/kubectl/kc/g')" >>~/.bashrc
                echo ':: Configuring Kubernetes Network'
@@ -156,6 +163,9 @@ _eof
                # setup kubectl and alias
                echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
                echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
+               echo "source <(kubectl completion bash)" >> /home/vagrant/.bashrc
+               echo "source <(complete -F __start_kubectl kc)" >> /home/vagrant/.bashrc
+               echo "source <(complete -F __start_kubectl ks)" >> /home/vagrant/.bashrc
                echo ':: Installing single node ETCD'
                export IP=#{k8s_master_ip}
                docker run -d --net=host -p 4001:2399 \
@@ -171,6 +181,13 @@ _eof
                curl http://openstorage-stork.s3-website-us-east-1.amazonaws.com/storkctl/latest/linux/storkctl -o storkctl &&
                sudo mv storkctl /usr/local/bin &&
                sudo chmod +x /usr/local/bin/storkctl
+               # install kubectx and kubens
+               sudo git clone https://github.com/ahmetb/kubectx /opt/kubectx
+               sudo ln -s /opt/kubectx/kubectx /usr/local/bin/kubectx
+               sudo ln -s /opt/kubectx/kubens /usr/local/bin/kubens
+               git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+               ~/.fzf/install --all
+
                echo ':: Installing Portworx DaemonSet ...'
                lh=""
                if [ #{k8s_master_host} == "k1m" ]; then
@@ -189,7 +206,8 @@ _eof
                   chown -R vagrant k8s-utils
                fi
                kbver=`kubectl version --short | awk -Fv '/Server Version: / {print $3}'`
-               curl -Lo px-spec.yaml "https://install.portworx.com/2.1/?kbver=$kbver&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&st=k8s$lh"
+               kubectl apply -f https://2.0.docs.portworx.com/samples/k8s/portworx-pxc-operator.yaml
+               curl -Lo px-spec.yaml "https://install.portworx.com/2.4/?kbver=$kbver&k=etcd:http://#{k8s_master_ip}:4001&m=#{myvmif}&d=#{myvmif}&c=px-7f6ff3d9-35dd-41ae-b1ac-535e15b552f6&stork=true&st=k8s$lh&s=/dev/sdc&mon=true"
                kubectl apply -f px-spec.yaml
                if [ #{k8s_master_host} == "k2m" ]; then
                 storkctl generate clusterpair -n default remotecluster-2 | sed '/insert_storage_options_here/c\\    ip: k2n1\\n    token: TOKEN_TOKEN' >/vagrant/cp.yaml
@@ -197,7 +215,6 @@ _eof
             else
                echo ':: Joining Kubernetes Cluster'
                kubeadm config images pull &
-               (docker pull portworx/oci-monitor:2.0.1 ; docker pull openstorage/stork:2.0.1 ; docker pull portworx/px-enterprise:2.0.1) &
                kubeadm join --token #{k8s_token} #{k8s_master_ip}:6443 --ignore-preflight-errors=all --discovery-token-unsafe-skip-ca-verification
                if [ `hostname` == "k2n3" ]; then
                  while : ; do
@@ -206,6 +223,7 @@ _eof
                    [ $? -eq 0 ] && break
                    sleep 5
                  done
+                 pxctl v c --size 20 ObjectstoreVolume
                 sed -i "s/TOKEN_TOKEN/$token/g" /vagrant/cp.yaml
                 kubectl --kubeconfig /vagrant/k1.conf create -f /vagrant/cp.yaml
                fi

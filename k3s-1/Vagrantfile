@@ -1,0 +1,116 @@
+1.11# -*- mode: ruby -*-
+# vim:ft=ruby:sw=3:et:
+
+vm_nodes = {            # EDIT to specify VM node names, and their private IP (vboxnet#)
+   'k3s-1-1' => "192.168.1.10",
+   'k3s-1-2' => "192.168.1.11",
+   'k3s-1-3' => "192.168.1.12"
+}
+
+# EDIT or specify ENV variable to define OS-Type (see `vm_conf` below)
+ostype = ENV['KUBE_OSTYPE'] || 'ubuntu16'
+#ostype = ENV['KUBE_OSTYPE'] || 'centos7'
+
+# VM config, format: <type-label> => [ 0:vagrant-box, 1:vm-net-iface, 2:vm-disk-controller, 3:vm-start-port, 4:vm-drives-map ]
+# see https://atlas.hashicorp.com/search? for more VM images (ie. "box-names")
+vm_conf = {
+   'ubuntu16' => [ 'ubuntu/bionic64', 'enp0s8','SCSI', 2, { "sdc" => 50*1024, "sdd" => 64*1024 } ],
+   'centos7'  => [ 'centos/7', 'eth1', 'IDE', 1, { "sdb" => 20*1024 } ]
+}
+
+# (internal variables)
+mybox, myvmif, mycntrl, myport, extra_disks = vm_conf[ostype]
+k3s_master_ip = "192.168.1.10"
+mystorage = "/dev/"+extra_disks.keys().join(",/dev/")
+
+
+#
+# VAGRANT SETUP
+#
+Vagrant.configure("2") do |config|
+
+   vm_nodes.each do |host,ip|
+      config.vm.define "#{host}" do |node|
+         node.vm.box = "#{mybox}"
+         node.vm.hostname = "#{host}"
+         node.vm.network "public_network", ip: "#{ip}", :netmask => '255.255.255.0', bridge: "en1: Wi-Fi (Wireless)"
+	      node.disksize.size = "20GB"
+         node.vm.provider "virtualbox" do |v|
+         v.gui = false
+         v.memory = 3072
+
+         # Extra customizations
+         v.customize 'pre-boot', ["modifyvm", :id, "--cpus", "2"]
+         v.customize 'pre-boot', ["modifyvm", :id, "--chipset", "ich9"]
+         v.customize 'pre-boot', ["modifyvm", :id, "--audio", "none"]
+         v.customize 'pre-boot', ["modifyvm", :id, "--usb", "off"]
+         v.customize 'pre-boot', ["modifyvm", :id, "--accelerate3d", "off"]
+         v.customize 'pre-boot', ["storagectl", :id, "--name", "#{mycntrl}", "--hostiocache", "on"]
+
+         # force Virtualbox to sync the time difference w/ threshold 10s (defl was 20 minutes)
+         v.customize [ "guestproperty", "set", :id, "/VirtualBox/GuestAdd/VBoxService/--timesync-set-threshold", 10000 ]
+
+         # Net boot speedup (see https://github.com/mitchellh/vagrant/issues/1807)
+         v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+         v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+
+         if defined?(extra_disks)
+            # NOTE: If you hit errors w/ extra disks provisioning, you may need to run "Virtual
+            # Media Manager" via VirtualBox GUI, and manually remove $host_sdX drives.
+            port = myport
+            extra_disks.each do |hdd, size|
+               vdisk_name = ".vagrant/#{host}_#{hdd}.vdi"
+               unless File.exist?(vdisk_name)
+                  v.customize ['createhd', '--filename', vdisk_name, '--size', "#{size}"]
+               end
+               v.customize ['storageattach', :id, '--storagectl', "#{mycntrl}", '--port', port, '--device', 0, '--type', 'hdd', '--medium', vdisk_name]
+               port = port + 1
+            end
+         end
+         end
+         # Custom post-install script below:
+         node.vm.provision "shell", inline: <<-SHELL
+            echo ':: Fixing ROOT access ...'
+            echo #{k3s_master_ip}
+            echo root:Password1 | chpasswd
+            sed -i -e 's/.*UseDNS.*/UseDNS no  # VAGRANT/' \
+               -e 's/.*PermitRootLogin.*/PermitRootLogin yes  # VAGRANT/' \
+               -e 's/.*PasswordAuthentication.*/PasswordAuthentication yes  # VAGRANT/' \
+               /etc/ssh/sshd_config && systemctl restart sshd
+
+            # Tune OS (kubernetes prerequisites)
+            modprobe br_netfilter
+            sysctl -w net.bridge.bridge-nf-call-iptables=1
+            sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+            echo ':: Fixing /etc/hosts ...'
+            sed -i -e 's/.*#{host}.*/# \\0  # VAGRANT/' /etc/hosts
+
+
+            # Configure/Start/Join cluster
+
+            hostname -I | grep -wq #{k3s_master_ip}
+            if [ $? -eq 0 ]; then
+               echo ':: Configuring K3S Master'
+               curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--advertise-address #{k3s_master_ip} --node-external-ip #{k3s_master_ip} --node-ip #{k3s_master_ip} --flannel-backend host-gw" sh -
+               cp /var/lib/rancher/k3s/server/node-token /vagrant/token
+               chmod 777 /etc/rancher/k3s/k3s.yaml
+               # install kubectx and kubens
+               sudo git clone https://github.com/ahmetb/kubectx /opt/kubectx
+               sudo ln -s /opt/kubectx/kubectx /usr/local/bin/kubectx
+               sudo ln -s /opt/kubectx/kubens /usr/local/bin/kubens
+               git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
+               ~/.fzf/install --all
+
+               kubectl apply -f 'https://edge-install.portworx.com/2.5?mc=false&kbver=1.17.4%2Bk3s1&b=true&c=px-k3s&st=k8s&m=#{myvmif}&d=#{myvmif}&stork=false&csi=true&st=k8s&stork=true'
+               kubectl patch ds -n kube-system portworx -p '{"spec": {"template": {"spec": {"containers": [{"name": "portworx","image": "portworx/oci-monitor:2.5.1"}]}}}}'
+               echo "alias kc='kubectl'" >> /home/vagrant/.bashrc
+               echo "alias ks='kubectl -n kube-system'" >> /home/vagrant/.bashrc
+               echo "alias kp='kubectl -n portworx'" >> /home/vagrant/.bashrc
+            else
+               echo ':: Joining K3S Cluster'
+               curl -sfL https://get.k3s.io | K3S_URL=https://#{k3s_master_ip}:6443 K3S_TOKEN=`cat /vagrant/token` INSTALL_K3S_EXEC="--node-external-ip #{ip} --node-ip #{ip}" sh -
+            fi
+         SHELL
+      end
+   end
+end
